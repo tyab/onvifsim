@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>ONVIF Simulator Test Page</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 2em; background-color: #f8f9fa; color: #212529; }
+        h1, h2 { color: #343a40; border-bottom: 2px solid #dee2e6; padding-bottom: 0.5em;}
+        .container { display: flex; gap: 2em; flex-wrap: wrap; }
+        .controls, .display { flex: 1; min-width: 400px; }
+        .display { display: flex; flex-direction: column; }
+        textarea, pre { width: 100%; height: 350px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 13px; border: 1px solid #ced4da; border-radius: 0.25rem; padding: 0.5em; box-sizing: border-box; }
+        pre { background-color: #fff; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }
+        button { margin: 5px 2px; padding: 10px 15px; font-size: 14px; border-radius: 0.25rem; border: 1px solid transparent; cursor: pointer; background-color: #007bff; color: white; }
+        button:hover { background-color: #0056b3; }
+        .service-group { margin-bottom: 1.5em; padding: 1em; background-color: #fff; border-radius: 0.25rem; box-shadow: 0 0.125rem 0.25rem rgba(0,0,0,.075); }
+    </style>
+</head>
+<body>
+    <h1>ONVIF Simulator Test Page</h1>
+    <div class="container">
+        <div class="controls">
+            <div class="service-group">
+                <h2>RTSPストリーム確認</h2>
+                <p><strong>RTSP URL:</strong> <code>{{ rtsp_url }}</code></p>
+                <a href="{{ rtsp_url }}"><button>プレーヤーで開く (VLCなど)</button></a>
+                <p><small>注意: VLCメディアプレーヤーなど、RTSPストリームを再生できるプレーヤーがインストールされている必要があります。</small></p>
+            </div>
+            <div class="service-group">
+                <h2>Device Service</h2>
+                <button onclick="sendSoap('/onvif/device_service', getCapabilitiesBody)">GetCapabilities</button>
+                <button onclick="sendSoap('/onvif/device_service', getDeviceInformationBody)">GetDeviceInformation</button>
+            </div>
+            <div class="service-group">
+                <h2>Media Service</h2>
+                <button onclick="sendSoap('/onvif/media_service', getProfilesBody)">GetProfiles</button>
+                <button onclick="sendSoap('/onvif/media_service', getStreamUriBody)">GetStreamUri</button>
+            </div>
+            <div class="service-group">
+                <h2>PTZ Service</h2>
+                <button onclick="sendSoap('/onvif/ptz_service', getNodesBody)">GetNodes</button>
+                <button onclick="sendSoap('/onvif/ptz_service', getStatusBody)">GetStatus</button>
+                <button onclick="sendSoap('/onvif/ptz_service', absoluteMoveBody)">AbsoluteMove (0.5, 0.5, 0.5)</button>
+                <button onclick="sendSoap('/onvif/ptz_service', continuousMoveBody)">ContinuousMove (Up-Right)</button>
+                <button onclick="sendSoap('/onvif/ptz_service', stopBody)">Stop</button>
+            </div>
+            <div class="service-group">
+                <h2>Imaging Service</h2>
+                <button onclick="sendSoap('/onvif/imaging_service', getImagingSettingsBody)">GetImagingSettings</button>
+                <button onclick="sendSoap('/onvif/imaging_service', setImagingSettingsBody)">SetImagingSettings (Bright: 60)</button>
+            </div>
+            <div class="service-group">
+                <h2>Events Service</h2>
+                <button onclick="sendSoap('/onvif/events_service', createPullPointSubscriptionBody)">CreatePullPointSubscription</button>
+                <button onclick="sendSoap('/onvif/events/pullpoint', pullMessagesBody)">PullMessages</button>
+                <p><small>30秒ごとにモーションイベントが生成されます。</small></p>
+            </div>
+        </div>
+        <div class="display">
+            <div>
+                <h3>SOAP Request Body</h3>
+                <pre id="request-body"></pre>
+            </div>
+            <div>
+                <h3>SOAP Response</h3>
+                <pre id="response-body"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // SOAP Body Templates
+        const getCapabilitiesBody = `<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>`;
+        const getDeviceInformationBody = `<tds:GetDeviceInformation/>`;
+
+        const getProfilesBody = `<trt:GetProfiles/>`;
+        const getStreamUriBody = `<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>{{ profile_token }}</trt:ProfileToken></trt:GetStreamUri>`;
+        
+        const getNodesBody = `<tptz:GetNodes/>`;
+        const getStatusBody = `<tptz:GetStatus><tptz:ProfileToken>{{ profile_token }}</tptz:ProfileToken></tptz:GetStatus>`;
+        const absoluteMoveBody = `<tptz:AbsoluteMove><tptz:ProfileToken>{{ profile_token }}</tptz:ProfileToken><tptz:Position><tt:PanTilt x="0.5" y="0.5"/><tt:Zoom x="0.5"/></tptz:Position></tptz:AbsoluteMove>`;
+        const continuousMoveBody = `<tptz:ContinuousMove><tptz:ProfileToken>{{ profile_token }}</tptz:ProfileToken><tptz:Velocity><tt:PanTilt x="0.5" y="0.5"/></tptz:Velocity></tptz:ContinuousMove>`;
+        const stopBody = `<tptz:Stop><tptz:ProfileToken>{{ profile_token }}</tptz:ProfileToken></tptz:Stop>`;
+
+        const getImagingSettingsBody = `<timg:GetImagingSettings xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"><timg:VideoSourceToken>{{ video_source_token }}</timg:VideoSourceToken></timg:GetImagingSettings>`;
+        const setImagingSettingsBody = `<timg:SetImagingSettings xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"><timg:VideoSourceToken>{{ video_source_token }}</timg:VideoSourceToken><timg:ImagingSettings><tt:Brightness>60.0</tt:Brightness></timg:ImagingSettings></timg:SetImagingSettings>`;
+
+        const createPullPointSubscriptionBody = `<tev:CreatePullPointSubscription xmlns:tev="http://www.onvif.org/ver10/events/wsdl"><tev:InitialTerminationTime>PT60S</tev:InitialTerminationTime></tev:CreatePullPointSubscription>`;
+        const pullMessagesBody = `<tev:PullMessages xmlns:tev="http://www.onvif.org/ver10/events/wsdl"><tev:Timeout>PT30S</tev:Timeout><tev:MessageLimit>10</tev:MessageLimit></tev:PullMessages>`;
+
+        async function sendSoap(endpoint, bodyContent) {
+            const requestBodyElem = document.getElementById('request-body');
+            const responseBodyElem = document.getElementById('response-body');
+
+            const soapEnvelope = `
+<soap-env:Envelope xmlns:soap-env="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl" xmlns:tev="http://www.onvif.org/ver10/events/wsdl">
+<soap-env:Header/>
+<soap-env:Body>
+    ${bodyContent}
+</soap-env:Body>
+</soap-env:Envelope>
+            `;
+
+            requestBodyElem.textContent = formatXml(soapEnvelope);
+            responseBodyElem.textContent = 'Sending...';
+
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/soap+xml; charset=utf-8' },
+                    body: soapEnvelope.trim()
+                });
+
+                const responseText = await response.text();
+                responseBodyElem.textContent = response.ok ? formatXml(responseText) : `Error: ${response.status} ${response.statusText}\n\n${responseText}`;
+
+            } catch (error) {
+                responseBodyElem.textContent = 'Network Error: ' + error;
+            }
+        }
+
+        function formatXml(xml) {
+            // This is a simple formatter, not a full-fledged XML parser.
+            // It might not work perfectly for all XML, but is good enough for display.
+            let formatted = '', indent = '';
+            const tab = '  ';
+            xml.split(/>\s*</).forEach(node => {
+                if (node.match(/^\//)) indent = indent.substring(tab.length);
+                formatted += indent + '<' + node.replace(/>\s*$/, '') + '>\n';
+                if (node.match(/^[^\/]/) && !node.match(/\/$/) && !node.match(/<\w+\s*\/>/)) indent += tab;
+            });
+            return formatted.substring(1, formatted.length - 2);
+        }
+    </script>
+</body>
+</html>
