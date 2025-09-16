@@ -2,5 +2,7 @@
     "Manufacturer": "ONVIF Simulator",
     "Model": "ONVIF Simulator",
     "FirmwareVersion": "1.0.0",
-    "HardwareId": "sim-hw-01"
+    "HardwareId": "sim-hw-01",
+    "Username": "admin",
+    "Password": "password"
 }

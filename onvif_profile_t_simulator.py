@@ -7,9 +7,12 @@ from xml.etree import ElementTree as ET
 from datetime import datetime, timedelta
 import time
 import json
+import base64
+import hashlib
 import socket
 
 from flask import Flask, request, Response, render_template
+from flask_cors import CORS
 from wsdiscovery.publishing import ThreadedWSPublishing as WSPublishing
 from wsdiscovery import QName, Scope
 
@@ -43,6 +46,7 @@ class OnvifSoapService:
     def __init__(self, server_ip, soap_port, rtsp_url, device_info, device_uuid, protocol="http",
                  enable_ptz_forwarding=False, ptz_forwarding_address=('127.0.0.1', 50001)):
         self.app = Flask(__name__)
+        CORS(self.app)
         self.server_ip = server_ip
         self.soap_port = soap_port
         self.rtsp_url = rtsp_url
@@ -65,6 +69,10 @@ class OnvifSoapService:
         self.ptz_move_thread = None
         self.ptz_stop_event = threading.Event()
         self.ptz_lock = threading.Lock()
+
+        # 認証済みクライアントを管理
+        self.authorized_clients = {} # { 'ip_address': expiration_time }
+        self.auth_lock = threading.Lock()
 
         # Unity連携が有効な場合、転送とフィードバックのセットアップを行う
         if self.ptz_forwarding_enabled:
@@ -138,8 +146,13 @@ class OnvifSoapService:
         """ONVIF操作をテストするためのシンプルなHTMLページを返す。"""
         # テンプレートに変数を渡してレンダリングする
         return render_template(
-            'index.html', protocol=self.protocol, host=f"{self.server_ip}:{self.soap_port}",
-            profile_token=self.profile_token, rtsp_url=self.rtsp_url, video_source_token=self.video_source_token
+            'index.html',
+            protocol=self.protocol,
+            server_ip=self.server_ip,
+            soap_port=self.soap_port,
+            profile_token=self.profile_token,
+            rtsp_url=self.rtsp_url,
+            video_source_token=self.video_source_token
         )
 
     def _generate_motion_events(self):
@@ -159,17 +172,15 @@ class OnvifSoapService:
         """SOAPリクエストを解析し、アクション名を抽出する。"""
         try:
             root = ET.fromstring(data)
-            # SOAP Body要素を探す (名前空間を無視して末尾が'Body'であるものを探す)
-            body = None
-            for element in root:
-                if element.tag.endswith('Body'):
-                    body = element
-                    break
+            # SOAP 1.2の名前空間でBody要素を探す
+            ns = {'soap-env': 'http://www.w3.org/2003/05/soap-envelope',
+                  'tptz': 'http://www.onvif.org/ver20/ptz/wsdl'} # PTZサービス用名前空間を追加
 
+            body = root.find('soap-env:Body', ns)
+            
             if body is None or len(body) == 0:
                 logging.warning("SOAPリクエスト内にBody要素またはアクションが見つかりません。")
                 return None
-
             # Bodyの最初の子要素がアクションとなる
             action_element = body[0]
             
@@ -179,8 +190,85 @@ class OnvifSoapService:
             logging.error(f"SOAPアクションの解析に失敗しました: {e}")
             return None
 
-    def _generate_soap_response(self, body_content):
+    def _verify_ws_security(self, data, unauthenticated_actions=None):
+        """WS-Securityヘッダーを検証する。"""
+        if self._parse_soap_action(data) in (unauthenticated_actions or []):
+            return True, ""
+
+        # 認証済みクライアントかチェック
+        client_ip = request.remote_addr
+        with self.auth_lock:
+            if client_ip in self.authorized_clients and self.authorized_clients[client_ip] > datetime.utcnow():
+                logging.info(f"認証済みクライアントからのリクエストを許可: {client_ip}")
+                return True, ""
+
+        # device_infoにユーザー名/パスワードがなければ認証不要とみなす
+        if 'Username' not in self.device_info or not self.device_info['Username']:
+            return True, ""
+
+        try:
+            root = ET.fromstring(data)
+            ns = {
+                'wsse': "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd",
+                'wsu': "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
+            }
+            
+            username_el = root.find('.//wsse:Username', ns)
+            password_digest_el = root.find('.//wsse:Password', ns)
+            nonce_el = root.find('.//wsse:Nonce', ns)
+            created_el = root.find('.//wsu:Created', ns)
+
+            if None in [username_el, password_digest_el, nonce_el, created_el]:
+                logging.warning("WS-Securityヘッダーの要素が不足しています。")
+                return False, "wsse:InvalidSecurity"
+
+            # 1. ユーザー名をチェック
+            if username_el.text != self.device_info['Username']:
+                logging.warning(f"ユーザー名が一致しません: expected={self.device_info['Username']}, actual={username_el.text}")
+                return False, "Sender"
+
+            # 2. サーバー側でDigestを再計算
+            # Digest = Base64(SHA1(Nonce + Created + Password))
+            try:
+                nonce_bytes = base64.b64decode(nonce_el.text)
+            except Exception:
+                logging.error("NonceのBase64デコードに失敗しました。")
+                return False, "Sender"
+
+            created_str = created_el.text
+            password_str = self.device_info['Password']
+
+            # バイト列を結合
+            combined = nonce_bytes + created_str.encode('utf-8') + password_str.encode('utf-8')
+
+            # SHA-1ハッシュを計算し、Base64エンコード
+            sha1 = hashlib.sha1()
+            sha1.update(combined)
+            server_digest = base64.b64encode(sha1.digest()).decode('utf-8')
+
+            # 3. Digestを比較
+            client_digest = password_digest_el.text
+            if server_digest == client_digest:
+                logging.info(f"WS-Security認証に成功しました: user={username_el.text}")
+                # 認証済みクライアントとして登録
+                with self.auth_lock:
+                    expiration = datetime.utcnow() + timedelta(minutes=10) # 10分間有効
+                    self.authorized_clients[client_ip] = expiration
+                    logging.info(f"クライアント {client_ip} を認証済みとして登録しました。有効期限: {expiration.isoformat()}Z")
+                return True, ""
+            else:
+                logging.warning(f"パスワードダイジェストが一致しません: user={username_el.text}。認証に失敗しました。")
+                return False, "wsse:FailedAuthentication"
+
+        except Exception as e:
+            logging.error(f"WS-Securityヘッダーの検証中にエラーが発生しました: {e}")
+            return False, "wsse:InvalidSecurity"
+
+    def _generate_soap_response(self, body_content, is_fault=False):
         """コンテンツをSOAPエンベロープでラップして応答を生成する。"""
+        # is_faultがTrueの場合、body_contentは既にFault要素なので、Bodyでラップしない
+        body_or_fault = body_content if is_fault else f"<soap-env:Body>{body_content}</soap-env:Body>"
+
         response_template = f"""
 <soap-env:Envelope
     xmlns:soap-env="http://www.w3.org/2003/05/soap-envelope"
@@ -188,19 +276,42 @@ class OnvifSoapService:
     xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
     xmlns:tt="http://www.onvif.org/ver10/schema"
     xmlns:tns1="http://www.onvif.org/ver10/topics"
+    xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
     xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
     xmlns:tev="http://www.onvif.org/ver10/events/wsdl"
     xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl">
     <soap-env:Header></soap-env:Header>
-    <soap-env:Body>
-        {body_content}
-    </soap-env:Body>
+    {body_or_fault}
 </soap-env:Envelope>
 """
         return Response(response_template, mimetype="application/soap+xml")
 
+    def _generate_soap_fault(self, subcode, reason):
+        """SOAP Fault応答を生成する。"""
+        # ONVIFの認証エラーでは、Codeは'Sender'、Subcodeで詳細を表すのが一般的
+        fault_body = f"""
+<soap-env:Body>
+    <soap-env:Fault>
+        <soap-env:Code>
+            <soap-env:Value>soap-env:Sender</soap-env:Value>
+            <soap-env:Subcode>
+                <soap-env:Value>{subcode}</soap-env:Value>
+            </soap-env:Subcode>
+        </soap-env:Code>
+        <soap-env:Reason>
+            <soap-env:Text xml:lang="en">{reason}</soap-env:Text>
+        </soap-env:Reason>
+    </soap-env:Fault>
+</soap-env:Body>
+"""
+        return self._generate_soap_response(fault_body, is_fault=True)
+
     def device_service(self):
         """device_serviceエンドポイントへのリクエストを処理する。"""
+        is_authorized, fault_code = self._verify_ws_security(request.data, unauthenticated_actions=["GetCapabilities"])
+        if not is_authorized:
+            return self._generate_soap_fault(fault_code, "An error occurred when verifying security")
+
         action = self._parse_soap_action(request.data)
         logging.info(f"Device serviceがアクションを受信: {action}")
 
@@ -249,6 +360,10 @@ class OnvifSoapService:
 
     def media_service(self):
         """media_serviceエンドポイントへのリクエストを処理する。"""
+        is_authorized, fault_code = self._verify_ws_security(request.data)
+        if not is_authorized:
+            return self._generate_soap_fault(fault_code, "An error occurred when verifying security")
+
         action = self._parse_soap_action(request.data)
         logging.info(f"Media serviceがアクションを受信: {action}")
 
@@ -299,10 +414,12 @@ class OnvifSoapService:
             return self._generate_soap_response(body)
 
         if action == "GetStreamUri":
+            # RTSP URLが指定されていない場合は空のURIを返す
+            uri = self.rtsp_url if self.rtsp_url else ""
             body = f"""
 <trt:GetStreamUriResponse>
     <trt:MediaUri>
-        <tt:Uri>{self.rtsp_url}</tt:Uri>
+        <tt:Uri>{uri}</tt:Uri>
         <tt:InvalidAfterConnect>false</tt:InvalidAfterConnect>
         <tt:InvalidAfterReboot>false</tt:InvalidAfterReboot>
         <tt:Timeout>PT60S</tt:Timeout>
@@ -352,6 +469,10 @@ class OnvifSoapService:
 
     def ptz_service(self):
         """ptz_serviceエンドポイントへのリクエストを処理する。"""
+        is_authorized, fault_code = self._verify_ws_security(request.data)
+        if not is_authorized:
+            return self._generate_soap_fault(fault_code, "An error occurred when verifying security")
+
         action = self._parse_soap_action(request.data)
         logging.info(f"PTZ serviceがアクションを受信: {action}")
 
@@ -399,11 +520,12 @@ class OnvifSoapService:
             try:
                 # XMLをパースして座標を取得
                 root = ET.fromstring(request.data)
-                ns = {
-                    'tt': 'http://www.onvif.org/ver10/schema'
-                }
-                pan_tilt_el = root.find('.//tt:PanTilt', ns)
-                zoom_el = root.find('.//tt:Zoom', ns)
+                # 複数の名前空間を定義
+                ns = {'soap-env': 'http://www.w3.org/2003/05/soap-envelope',
+                      'tptz': 'http://www.onvif.org/ver20/ptz/wsdl',
+                      'tt': 'http://www.onvif.org/ver10/schema'}
+                pan_tilt_el = root.find('.//tptz:Position/tt:PanTilt', ns)
+                zoom_el = root.find('.//tptz:Position/tt:Zoom', ns)
 
                 with self.ptz_lock:
                     if pan_tilt_el is not None:
@@ -442,9 +564,12 @@ class OnvifSoapService:
 
             try:
                 root = ET.fromstring(request.data)
-                ns = {'tt': 'http://www.onvif.org/ver10/schema'}
-                velocity_el = root.find('.//tt:PanTilt', ns)
-                zoom_el = root.find('.//tt:Zoom', ns)
+                # 複数の名前空間を定義
+                ns = {'soap-env': 'http://www.w3.org/2003/05/soap-envelope',
+                      'tptz': 'http://www.onvif.org/ver20/ptz/wsdl',
+                      'tt': 'http://www.onvif.org/ver10/schema'}
+                velocity_el = root.find('.//tptz:Velocity/tt:PanTilt', ns)
+                zoom_el = root.find('.//tptz:Velocity/tt:Zoom', ns)
                 with self.ptz_lock:
                     if velocity_el is not None:
                         self.ptz_velocity['x'] = float(velocity_el.attrib.get('x', 0.0))
@@ -506,8 +631,8 @@ class OnvifSoapService:
 <tptz:GetStatusResponse>
     <tptz:PTZStatus>
         <tt:Position>
-            <tt:PanTilt x="{pos['x']}" y="{pos['y']}" space="http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace"/>
-            <tt:Zoom x="{pos['z']}" space="http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace"/>
+            <tt:PanTilt x="{pos['x']}" y="{pos['y']}" space="http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace" />
+            <tt:Zoom x="{pos['z']}" space="http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace" />
         </tt:Position>
         <tt:MoveStatus>{move_status}</tt:MoveStatus>
         <tt:UtcTime>{datetime.utcnow().isoformat()}Z</tt:UtcTime>
@@ -521,6 +646,10 @@ class OnvifSoapService:
 
     def imaging_service(self):
         """imaging_serviceエンドポイントへのリクエストを処理する。"""
+        is_authorized, fault_code = self._verify_ws_security(request.data)
+        if not is_authorized:
+            return self._generate_soap_fault(fault_code, "An error occurred when verifying security")
+
         action = self._parse_soap_action(request.data)
         logging.info(f"Imaging serviceがアクションを受信: {action}")
 
@@ -562,6 +691,10 @@ class OnvifSoapService:
 
     def events_service(self):
         """events_serviceエンドポイントへのリクエストを処理する。"""
+        is_authorized, fault_code = self._verify_ws_security(request.data)
+        if not is_authorized:
+            return self._generate_soap_fault(fault_code, "An error occurred when verifying security")
+
         action = self._parse_soap_action(request.data)
         logging.info(f"Events serviceがアクションを受信: {action}")
 
@@ -586,6 +719,10 @@ class OnvifSoapService:
 
     def pull_messages(self):
         """PullPointからのPullMessagesリクエストを処理する。"""
+        is_authorized, fault_code = self._verify_ws_security(request.data)
+        if not is_authorized:
+            return self._generate_soap_fault(fault_code, "An error occurred when verifying security")
+
         with self.events_lock:
             events_to_send = self.events_queue.copy()
             self.events_queue.clear() # キューをクリア
@@ -679,7 +816,7 @@ class OnvifSimulator:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ONVIF Profile T Simulator")
-    parser.add_argument("rtsp_url", type=str, help="外部RTSPサーバーの完全なURL (例: rtsp://127.0.0.1:8554/mystream)")
+    parser.add_argument("--rtsp-url", type=str, default="", help="外部RTSPサーバーのURL。指定しない場合、ストリームURIは空になります。")
     parser.add_argument("--ip", type=str, help="シミュレーターをバインドするサーバーのIPアドレス (未指定の場合は自動検出)")
     parser.add_argument("--device-info", type=str, default="device_info.json", help="デバイス情報JSONファイルのパス")
     parser.add_argument("--soap-port", type=int, default=8080, help="SOAPサービス用のポート番号 (デフォルト: 8080)")

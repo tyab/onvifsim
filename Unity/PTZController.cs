@@ -32,6 +32,9 @@ public class PTZController : MonoBehaviour
     [Tooltip("パン（水平回転）の可動範囲（度）")]
     public Vector2 panRange = new Vector2(-180f, 180f);
 
+    [Tooltip("パンを連続回転させるか")]
+    public bool endlessPan = true;
+
     [Tooltip("チルト（垂直回転）の可動範囲（度）")]
     public Vector2 tiltRange = new Vector2(-90f, 20f);
 
@@ -57,10 +60,11 @@ public class PTZController : MonoBehaviour
     private UdpClient client;
     private Camera controlledCamera;
 
-    // PTZ状態変数（別スレッドからアクセスされるためvolatile指定）
-    private volatile Vector3 targetEulerAngles;
+    // PTZ状態変数
+    private Vector3 targetEulerAngles;
     private volatile float targetFieldOfView;
-    private volatile Vector3 continuousVelocity; // (pan, tilt, zoom) の速度
+    private Vector3 continuousVelocity; // (pan, tilt, zoom) の速度
+    private readonly object ptzStateLock = new object();
     private volatile bool isRunning;
 
     // フィードバック用
@@ -105,9 +109,12 @@ public class PTZController : MonoBehaviour
         }
 
         // 現在のカメラの状態を初期値として設定
-        targetEulerAngles = transform.eulerAngles;
+        lock (ptzStateLock)
+        {
+            targetEulerAngles = transform.eulerAngles;
+            continuousVelocity = Vector3.zero;
+        }
         targetFieldOfView = controlledCamera.fieldOfView;
-        continuousVelocity = Vector3.zero;
 
         // UDP受信スレッドを開始
         isRunning = true;
@@ -128,23 +135,45 @@ public class PTZController : MonoBehaviour
 
     void Update()
     {
+        Vector3 localContinuousVelocity;
+        lock (ptzStateLock)
+        {
+            localContinuousVelocity = continuousVelocity;
+        }
+
         // 連続移動が指示されている場合、速度に応じて目標値を更新
-        if (continuousVelocity.sqrMagnitude > 0.001f)
+        if (localContinuousVelocity.sqrMagnitude > 0.001f)
         {
             // 速度と時間から移動量を計算
             // Unityのオイラー角ではYがパン、Xがチルト（しかも向きが逆）
-            float newPan = targetEulerAngles.y + continuousVelocity.x * panSpeedMultiplier * Time.deltaTime;
-            float newTilt = targetEulerAngles.x - continuousVelocity.y * tiltSpeedMultiplier * Time.deltaTime;
-            float newFov = targetFieldOfView - continuousVelocity.z * zoomSpeedMultiplier * Time.deltaTime;
+            float deltaPan = localContinuousVelocity.x * panSpeedMultiplier * Time.deltaTime;
+            float deltaTilt = -localContinuousVelocity.y * tiltSpeedMultiplier * Time.deltaTime;
 
-            // 可動範囲内に収める
-            targetEulerAngles.y = Mathf.Clamp(newPan, panRange.x, panRange.y);
-            targetEulerAngles.x = Mathf.Clamp(newTilt, tiltRange.x, tiltRange.y);
+            lock (ptzStateLock)
+            {
+                if (endlessPan)
+                {
+                    targetEulerAngles.y += deltaPan;
+                }
+                else
+                {
+                    targetEulerAngles.y = Mathf.Clamp(targetEulerAngles.y + deltaPan, panRange.x, panRange.y);
+                }
+
+                targetEulerAngles.x = Mathf.Clamp(targetEulerAngles.x + deltaTilt, tiltRange.x, tiltRange.y);
+            }
+            float newFov = targetFieldOfView - localContinuousVelocity.z * zoomSpeedMultiplier * Time.deltaTime;
             targetFieldOfView = Mathf.Clamp(newFov, zoomRange.y, zoomRange.x); // FoVは値が小さいほどズームインなのでMin/Maxが逆
         }
 
-        // 現在の値から目標値へ滑らかにカメラを動かす (Lerp)
-        transform.eulerAngles = Vector3.Lerp(transform.eulerAngles, targetEulerAngles, Time.deltaTime * smoothingFactor);
+        Vector3 localTargetEulerAngles;
+        lock (ptzStateLock)
+        {
+            localTargetEulerAngles = targetEulerAngles;
+        }
+        // 現在の値から目標値へ滑らかにカメラを動かす (Slerp)
+        Quaternion targetRotation = Quaternion.Euler(localTargetEulerAngles);
+        transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.deltaTime * smoothingFactor);
         controlledCamera.fieldOfView = Mathf.Lerp(controlledCamera.fieldOfView, targetFieldOfView, Time.deltaTime * smoothingFactor);
 
         // 定期的に現在位置をフィードバック
@@ -165,13 +194,24 @@ public class PTZController : MonoBehaviour
 
         try
         {
+            // ★★★ 修正点: フィードバックも現在の実際の角度を基準にする ★★★
+            Vector3 currentEulerAngles = transform.eulerAngles; // 0-360度の範囲で返ってくる
+
+            // パンの角度を -180 ～ 180 の範囲に正規化する
+            float wrappedPan = currentEulerAngles.y;
+            if (wrappedPan > 180f)
+            {
+                wrappedPan -= 360f;
+            }
+
             // 現在のUnityの値をONVIFの正規化座標に逆変換
             var status = new PtzStatusMessage
             {
                 // Pan: [panRange.x, panRange.y] -> [-1, 1]
-                pan = Mathf.InverseLerp(panRange.x, panRange.y, transform.eulerAngles.y) * 2f - 1f,
+                // endlessPanが有効な場合、panRangeは事実上[-180, 180]として扱う
+                pan = Mathf.InverseLerp(panRange.x, panRange.y, wrappedPan) * 2f - 1f,
                 // Tilt: [tiltRange.y, tiltRange.x] -> [-1, 1]
-                tilt = Mathf.InverseLerp(tiltRange.y, tiltRange.x, transform.eulerAngles.x) * 2f - 1f,
+                tilt = Mathf.InverseLerp(tiltRange.y, tiltRange.x, currentEulerAngles.x) * 2f - 1f,
                 // Zoom: [zoomRange.x, zoomRange.y] -> [0, 1]
                 zoom = Mathf.InverseLerp(zoomRange.x, zoomRange.y, controlledCamera.fieldOfView)
             };
@@ -224,23 +264,31 @@ public class PTZController : MonoBehaviour
             {
                 case "absolute":
                     // ONVIFの正規化座標をUnityの角度/FoVに変換
-                    // Pan: [-1, 1] -> [panRange.x, panRange.y]
-                    targetEulerAngles.y = Mathf.Lerp(panRange.x, panRange.y, (msg.pan + 1f) / 2f);
-                    // Tilt: [-1, 1] -> [tiltRange.y, tiltRange.x] (ONVIFとUnityで向きが逆)
-                    targetEulerAngles.x = Mathf.Lerp(tiltRange.y, tiltRange.x, (msg.tilt + 1f) / 2f);
+                    lock (ptzStateLock)
+                    {
+                        // Pan: [-1, 1] -> [panRange.x, panRange.y]
+                        targetEulerAngles.y = Mathf.Lerp(panRange.x, panRange.y, (msg.pan + 1f) / 2f);
+                        // Tilt: [-1, 1] -> [tiltRange.y, tiltRange.x] (ONVIFとUnityで向きが逆)
+                        targetEulerAngles.x = Mathf.Lerp(tiltRange.y, tiltRange.x, (msg.tilt + 1f) / 2f);
+                        // 連続移動を停止
+                        continuousVelocity = Vector3.zero;
+                    }
                     // Zoom: [0, 1] -> [zoomRange.x, zoomRange.y]
                     targetFieldOfView = Mathf.Lerp(zoomRange.x, zoomRange.y, msg.zoom);
-                    
-                    // 連続移動を停止
-                    continuousVelocity = Vector3.zero;
                     break;
 
                 case "continuous":
-                    continuousVelocity = new Vector3(msg.pan_speed, msg.tilt_speed, msg.zoom_speed);
+                    lock (ptzStateLock)
+                    {
+                        // 連続移動を開始する前に、現在のカメラの実際の角度で目標値をリセットする
+                        // これにより、AbsoluteMove後のSlerpの遅延による位置の飛びを防ぐ
+                        targetEulerAngles = transform.eulerAngles;
+                        continuousVelocity = new Vector3(msg.pan_speed, msg.tilt_speed, msg.zoom_speed);
+                    }
                     break;
 
                 case "stop":
-                    continuousVelocity = Vector3.zero;
+                    lock (ptzStateLock) { continuousVelocity = Vector3.zero; }
                     break;
             }
         }

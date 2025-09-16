@@ -1,3 +1,4 @@
 # SSL証明書
 cert.pem
 key.pem
+.DS_Store

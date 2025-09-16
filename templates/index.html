@@ -5,136 +5,265 @@
     <title>ONVIF Simulator Test Page</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 2em; background-color: #f8f9fa; color: #212529; }
-        h1, h2 { color: #343a40; border-bottom: 2px solid #dee2e6; padding-bottom: 0.5em;}
-        .container { display: flex; gap: 2em; flex-wrap: wrap; }
-        .controls, .display { flex: 1; min-width: 400px; }
-        .display { display: flex; flex-direction: column; }
-        textarea, pre { width: 100%; height: 350px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 13px; border: 1px solid #ced4da; border-radius: 0.25rem; padding: 0.5em; box-sizing: border-box; }
-        pre { background-color: #fff; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }
-        button { margin: 5px 2px; padding: 10px 15px; font-size: 14px; border-radius: 0.25rem; border: 1px solid transparent; cursor: pointer; background-color: #007bff; color: white; }
-        button:hover { background-color: #0056b3; }
+        h1, h2, h3 { color: #343a40; border-bottom: 2px solid #dee2e6; padding-bottom: 0.5em;}
+        .container { display: flex; flex-direction: column; gap: 2em; }
+        .ptz-container { display: flex; flex-wrap: wrap; gap: 2em; }
+        .ptz-controls { flex: 1; min-width: 300px; background-color: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 1em; box-shadow: 0 0.125rem 0.25rem rgba(0,0,0,.075); }
+        .ptz-grid { display: grid; grid-template-columns: 60px 60px 60px; grid-template-rows: 60px 60px 60px; gap: 5px; }
+        .ptz-grid button { width: 100%; height: 100%; font-size: 1.5em; }
+        .zoom-controls { display: flex; flex-direction: column; margin-left: 10px; }
+        .other-controls { margin-top: 2em; }
         .service-group { margin-bottom: 1.5em; padding: 1em; background-color: #fff; border-radius: 0.25rem; box-shadow: 0 0.125rem 0.25rem rgba(0,0,0,.075); }
+        .service-group button { margin: 5px 2px; }
+        #log { border: 1px solid #ced4da; background-color: #fff; padding: 10px; height: 250px; overflow-y: scroll; white-space: pre-wrap; margin-top: 1em; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 13px; border-radius: 0.25rem; }
+        input[type=number] { width: 80px; padding: 5px; border: 1px solid #ced4da; border-radius: 0.25rem; }
+        .abs-input { margin-bottom: 10px; }
+        button { padding: 8px 12px; font-size: 14px; border-radius: 0.25rem; border: 1px solid transparent; cursor: pointer; background-color: #007bff; color: white; }
+        button:hover { background-color: #0056b3; }
     </style>
 </head>
 <body>
     <h1>ONVIF Simulator Test Page</h1>
+    <div class="service-group">
+        <h2>Target Device</h2>
+        <div style="display: flex; align-items: center; gap: 15px;">
+            <div>IP Address: <input type="text" id="targetIp" value="{{ server_ip }}" style="width: 150px;"></div>
+            <div>Port: <input type="number" id="targetPort" value="{{ soap_port }}" style="width: 80px;"></div>
+            <div>Username: <input type="text" id="username" value="admin" style="width: 120px;"></div>
+            <div>Password: <input type="password" id="password" value="" style="width: 120px;"></div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
+            <button onclick="authenticateDevice()">Authenticate</button>
+            <div id="authStatus" style="font-weight: bold;">Status: Not Authenticated</div>
+        </div>
+        <p style="font-size: 0.9em; margin-top: 5px;">テスト対象のONVIFデバイス（シミュレーターまたは実機）のIPアドレスとポートを指定します。</p>
+    </div>
+
     <div class="container">
-        <div class="controls">
-            <div class="service-group">
-                <h2>RTSPストリーム確認</h2>
-                <p><strong>RTSP URL:</strong> <code>{{ rtsp_url }}</code></p>
-                <a href="{{ rtsp_url }}"><button>プレーヤーで開く (VLCなど)</button></a>
-                <p><small>注意: VLCメディアプレーヤーなど、RTSPストリームを再生できるプレーヤーがインストールされている必要があります。</small></p>
-            </div>
-            <div class="service-group">
-                <h2>Device Service</h2>
-                <button onclick="sendSoap('/onvif/device_service', getCapabilitiesBody)">GetCapabilities</button>
-                <button onclick="sendSoap('/onvif/device_service', getDeviceInformationBody)">GetDeviceInformation</button>
-            </div>
-            <div class="service-group">
-                <h2>Media Service</h2>
-                <button onclick="sendSoap('/onvif/media_service', getProfilesBody)">GetProfiles</button>
-                <button onclick="sendSoap('/onvif/media_service', getStreamUriBody)">GetStreamUri</button>
-            </div>
-            <div class="service-group">
-                <h2>PTZ Service</h2>
-                <button onclick="sendSoap('/onvif/ptz_service', getNodesBody)">GetNodes</button>
-                <button onclick="sendSoap('/onvif/ptz_service', getStatusBody)">GetStatus</button>
-                <button onclick="sendSoap('/onvif/ptz_service', absoluteMoveBody)">AbsoluteMove (0.5, 0.5, 0.5)</button>
-                <button onclick="sendSoap('/onvif/ptz_service', continuousMoveBody)">ContinuousMove (Up-Right)</button>
-                <button onclick="sendSoap('/onvif/ptz_service', stopBody)">Stop</button>
-            </div>
-            <div class="service-group">
-                <h2>Imaging Service</h2>
-                <button onclick="sendSoap('/onvif/imaging_service', getImagingSettingsBody)">GetImagingSettings</button>
-                <button onclick="sendSoap('/onvif/imaging_service', setImagingSettingsBody)">SetImagingSettings (Bright: 60)</button>
-            </div>
-            <div class="service-group">
-                <h2>Events Service</h2>
-                <button onclick="sendSoap('/onvif/events_service', createPullPointSubscriptionBody)">CreatePullPointSubscription</button>
-                <button onclick="sendSoap('/onvif/events/pullpoint', pullMessagesBody)">PullMessages</button>
-                <p><small>30秒ごとにモーションイベントが生成されます。</small></p>
+        <div>
+            <h2>PTZ Control</h2>
+            <div class="ptz-container">
+                <div class="ptz-controls">
+                    <h3>Continuous Move</h3>
+                    <div style="display: flex;">
+                        <div class="ptz-grid">
+                            <button onmousedown="ptzContinuousMove(-0.5, 0.5)" onmouseup="ptzStop()">↖</button>
+                            <button onmousedown="ptzContinuousMove(0, 0.5)" onmouseup="ptzStop()">↑</button>
+                            <button onmousedown="ptzContinuousMove(0.5, 0.5)" onmouseup="ptzStop()">↗</button>
+                            <button onmousedown="ptzContinuousMove(-0.5, 0)" onmouseup="ptzStop()">←</button>
+                            <button onclick="ptzStop()">■</button>
+                            <button onmousedown="ptzContinuousMove(0.5, 0)" onmouseup="ptzStop()">→</button>
+                            <button onmousedown="ptzContinuousMove(-0.5, -0.5)" onmouseup="ptzStop()">↙</button>
+                            <button onmousedown="ptzContinuousMove(0, -0.5)" onmouseup="ptzStop()">↓</button>
+                            <button onmousedown="ptzContinuousMove(0.5, -0.5)" onmouseup="ptzStop()">↘</button>
+                        </div>
+                        <div class="zoom-controls">
+                            <button onmousedown="ptzContinuousMove(0, 0, 0.5)" onmouseup="ptzStop()">Zoom In (+)</button>
+                            <button onmousedown="ptzContinuousMove(0, 0, -0.5)" onmouseup="ptzStop()">Zoom Out (-)</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="ptz-controls">
+                    <h3>Absolute Move</h3>
+                    <p style="margin-top:0; font-size: 0.9em;">Pan/Tilt: -1.0 to 1.0, Zoom: 0.0 to 1.0</p>
+                    <div class="abs-input">Pan: <input type="number" id="panAbs" value="0.0" step="0.1" min="-1.0" max="1.0"></div>
+                    <div class="abs-input">Tilt: <input type="number" id="tiltAbs" value="0.0" step="0.1" min="-1.0" max="1.0"></div>
+                    <div class="abs-input">Zoom: <input type="number" id="zoomAbs" value="0.0" step="0.1" min="0.0" max="1.0"></div>
+                    <button onclick="ptzAbsoluteMove()">Go to Position</button>
+                </div>
             </div>
         </div>
-        <div class="display">
-            <div>
-                <h3>SOAP Request Body</h3>
-                <pre id="request-body"></pre>
+
+        <div class="other-controls">
+            <h2>Other ONVIF Commands</h2>
+            <div class="service-group">
+                <h3>Device & Media</h3>
+                <button onclick="sendSoapRequest('device_service', getCapabilitiesBody)">GetCapabilities</button>
+                <button onclick="sendSoapRequest('device_service', getDeviceInformationBody)">GetDeviceInformation</button>
+                <button onclick="sendSoapRequest('media_service', getProfilesBody)">GetProfiles</button>
+                <button onclick="sendSoapRequest('media_service', getStreamUriBody)">GetStreamUri</button>
+                {% if rtsp_url %}
+                <p style="margin-top: 10px;"><strong>Simulator's RTSP URL:</strong> <code>{{ rtsp_url }}</code></p>
+                {% endif %}
             </div>
-            <div>
-                <h3>SOAP Response</h3>
-                <pre id="response-body"></pre>
+            <div class="service-group">
+                <h3>PTZ & Imaging</h3>
+                <button onclick="sendSoapRequest('ptz_service', getNodesBody)">GetNodes</button>
+                <button onclick="sendSoapRequest('ptz_service', getStatusBody)">GetStatus</button>
+                <button onclick="sendSoapRequest('imaging_service', getImagingSettingsBody)">GetImagingSettings</button>
             </div>
+            <div class="service-group">
+                <h3>Events</h3>
+                <button onclick="sendSoapRequest('events_service', createPullPointSubscriptionBody)">CreatePullPointSubscription</button>
+                <button onclick="sendSoapRequest('events/pullpoint', pullMessagesBody)">PullMessages</button>
+            </div>
+        </div>
+
+        <div>
+            <h2>Log</h2>
+            <div id="log"></div>
         </div>
     </div>
 
     <script>
-        const serverProtocol = '{{ protocol }}';
-        const serverHost = '{{ host }}';
+        const protocol = '{{ protocol }}';
+        const profileToken = '{{ profile_token }}';
+        const videoSourceToken = '{{ video_source_token }}';
+        const logDiv = document.getElementById('log');
 
-        // SOAP Body Templates
+        // --- SOAP Body Templates ---
         const getCapabilitiesBody = `<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>`;
         const getDeviceInformationBody = `<tds:GetDeviceInformation/>`;
-
         const getProfilesBody = `<trt:GetProfiles/>`;
-        const getStreamUriBody = `<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>{{ profile_token }}</trt:ProfileToken></trt:GetStreamUri>`;
-        
+        const getStreamUriBody = `<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>${profileToken}</trt:ProfileToken></trt:GetStreamUri>`;
         const getNodesBody = `<tptz:GetNodes/>`;
-        const getStatusBody = `<tptz:GetStatus><tptz:ProfileToken>{{ profile_token }}</tptz:ProfileToken></tptz:GetStatus>`;
-        const absoluteMoveBody = `<tptz:AbsoluteMove><tptz:ProfileToken>{{ profile_token }}</tptz:ProfileToken><tptz:Position><tt:PanTilt x="0.5" y="0.5"/><tt:Zoom x="0.5"/></tptz:Position></tptz:AbsoluteMove>`;
-        const continuousMoveBody = `<tptz:ContinuousMove><tptz:ProfileToken>{{ profile_token }}</tptz:ProfileToken><tptz:Velocity><tt:PanTilt x="0.5" y="0.5"/></tptz:Velocity></tptz:ContinuousMove>`;
-        const stopBody = `<tptz:Stop><tptz:ProfileToken>{{ profile_token }}</tptz:ProfileToken></tptz:Stop>`;
+        const getStatusBody = `<tptz:GetStatus><tptz:ProfileToken>${profileToken}</tptz:ProfileToken></tptz:GetStatus>`;
+        const getImagingSettingsBody = `<timg:GetImagingSettings><timg:VideoSourceToken>${videoSourceToken}</timg:VideoSourceToken></timg:GetImagingSettings>`;
+        const createPullPointSubscriptionBody = `<tev:CreatePullPointSubscription><tev:InitialTerminationTime>PT60S</tev:InitialTerminationTime></tev:CreatePullPointSubscription>`;
+        const pullMessagesBody = `<tev:PullMessages><tev:Timeout>PT30S</tev:Timeout><tev:MessageLimit>10</tev:MessageLimit></tev:PullMessages>`;
 
-        const getImagingSettingsBody = `<timg:GetImagingSettings xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"><timg:VideoSourceToken>{{ video_source_token }}</timg:VideoSourceToken></timg:GetImagingSettings>`;
-        const setImagingSettingsBody = `<timg:SetImagingSettings xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"><timg:VideoSourceToken>{{ video_source_token }}</timg:VideoSourceToken><timg:ImagingSettings><tt:Brightness>60.0</tt:Brightness></timg:ImagingSettings></timg:SetImagingSettings>`;
+        function log(message) {
+            const time = new Date().toLocaleTimeString();
+            logDiv.innerHTML = `[${time}] ${message}\n` + logDiv.innerHTML;
+        }
 
-        const createPullPointSubscriptionBody = `<tev:CreatePullPointSubscription xmlns:tev="http://www.onvif.org/ver10/events/wsdl"><tev:InitialTerminationTime>PT60S</tev:InitialTerminationTime></tev:CreatePullPointSubscription>`;
-        const pullMessagesBody = `<tev:PullMessages xmlns:tev="http://www.onvif.org/ver10/events/wsdl"><tev:Timeout>PT30S</tev:Timeout><tev:MessageLimit>10</tev:MessageLimit></tev:PullMessages>`;
-
-        async function sendSoap(endpoint, bodyContent) {
-            const requestBodyElem = document.getElementById('request-body');
-            const responseBodyElem = document.getElementById('response-body');
-
+        async function sendSoapRequest(service, body) {
+            const targetIp = document.getElementById('targetIp').value;
+            const targetPort = document.getElementById('targetPort').value;
+            if (!targetIp || !targetPort) {
+                alert('Target IP Address and Port must be specified.');
+                return;
+            }
+            const url = `${protocol}://${targetIp}:${targetPort}/onvif/${service}`;
             const soapEnvelope = `
-<soap-env:Envelope xmlns:soap-env="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl" xmlns:tev="http://www.onvif.org/ver10/events/wsdl">
-<soap-env:Header/>
-<soap-env:Body>
-    ${bodyContent}
-</soap-env:Body>
+<soap-env:Envelope
+    xmlns:soap-env="http://www.w3.org/2003/05/soap-envelope"
+    xmlns:tds="http://www.onvif.org/ver10/device/wsdl"
+    xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
+    xmlns:tt="http://www.onvif.org/ver10/schema"
+    xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
+    xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
+    xmlns:tev="http://www.onvif.org/ver10/events/wsdl"
+    xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+    xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
+    <soap-env:Header>${await generateWSSecurityHeader()}</soap-env:Header>
+    <soap-env:Body>${body}</soap-env:Body>
 </soap-env:Envelope>
             `;
 
-            requestBodyElem.textContent = formatXml(soapEnvelope);
-            responseBodyElem.textContent = 'Sending...';
+            log(`Request to ${service}:\n${soapEnvelope.trim().replace(/\s+/g, ' ')}`);
 
             try {
-                const url = `${serverProtocol}://${serverHost}${endpoint}`;
                 const response = await fetch(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/soap+xml; charset=utf-8' },
                     body: soapEnvelope.trim()
                 });
 
-                const responseText = await response.text();
-                responseBodyElem.textContent = response.ok ? formatXml(responseText) : `Error: ${response.status} ${response.statusText}\n\n${responseText}`;
-
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const text = await response.text();
+                log(`Response from ${service}:\n${text.trim().replace(/\s+/g, ' ')}`);
+                return true; // Success
             } catch (error) {
-                responseBodyElem.textContent = 'Network Error: ' + error;
+                log(`Error: ${error}`);
+                console.error('Fetch error:', error);
             }
         }
 
-        function formatXml(xml) {
-            // This is a simple formatter, not a full-fledged XML parser.
-            // It might not work perfectly for all XML, but is good enough for display.
-            let formatted = '', indent = '';
-            const tab = '  ';
-            xml.split(/>\s*</).forEach(node => {
-                if (node.match(/^\//)) indent = indent.substring(tab.length);
-                formatted += indent + '<' + node.replace(/>\s*$/, '') + '>\n';
-                if (node.match(/^[^\/]/) && !node.match(/\/$/) && !node.match(/<\w+\s*\/>/)) indent += tab;
-            });
-            return formatted.substring(1, formatted.length - 2);
+        function ptzContinuousMove(panSpeed, tiltSpeed, zoomSpeed = 0) {
+            const body = `
+<tptz:ContinuousMove xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
+    <tptz:ProfileToken>${profileToken}</tptz:ProfileToken>
+    <tptz:Velocity>
+        <tt:PanTilt x="${panSpeed}" y="${tiltSpeed}" />
+        <tt:Zoom x="${zoomSpeed}" />
+    </tptz:Velocity>
+</tptz:ContinuousMove>
+            `;
+            sendSoapRequest('ptz_service', body);
         }
+
+        function ptzStop() {
+            const body = `
+<tptz:Stop xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
+    <tptz:ProfileToken>${profileToken}</tptz:ProfileToken>
+    <tptz:PanTilt>true</tptz:PanTilt>
+    <tptz:Zoom>true</tptz:Zoom>
+</tptz:Stop>
+            `;
+            sendSoapRequest('ptz_service', body);
+        }
+
+        function ptzAbsoluteMove() {
+            const pan = document.getElementById('panAbs').value;
+            const tilt = document.getElementById('tiltAbs').value;
+            const zoom = document.getElementById('zoomAbs').value;
+
+            const body = `
+<tptz:AbsoluteMove xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
+    <tptz:ProfileToken>${profileToken}</tptz:ProfileToken>
+    <tptz:Position>
+        <tt:PanTilt x="${pan}" y="${tilt}" />
+        <tt:Zoom x="${zoom}" />
+    </tptz:Position>
+</tptz:AbsoluteMove>
+            `;
+            sendSoapRequest('ptz_service', body);
+        }
+
+        async function authenticateDevice() {
+            const authStatusDiv = document.getElementById('authStatus');
+            authStatusDiv.textContent = 'Status: Authenticating...';
+            authStatusDiv.style.color = 'orange';
+
+            const success = await sendSoapRequest('device_service', getDeviceInformationBody);
+            authStatusDiv.textContent = success ? 'Status: Authenticated' : 'Status: Authentication Failed';
+            authStatusDiv.style.color = success ? 'green' : 'red';
+        }
+
+        async function generateWSSecurityHeader() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            if (!username) {
+                return ''; // ユーザー名がなければ認証ヘッダーなし
+            }
+
+            const created = new Date().toISOString();
+            
+            // 1. Nonceの生成 (16バイトのランダム値)
+            const nonceBytes = new Uint8Array(16);
+            window.crypto.getRandomValues(nonceBytes);
+            const nonceBase64 = btoa(String.fromCharCode.apply(null, nonceBytes));
+
+            // 2. Digestの計算 (SHA-1)
+            // Digest = Base64(SHA1(Nonce + Created + Password))
+            const encoder = new TextEncoder();
+            const passwordBytes = encoder.encode(password);
+            const createdBytes = encoder.encode(created);
+            
+            const combined = new Uint8Array(nonceBytes.length + createdBytes.length + passwordBytes.length);
+            combined.set(nonceBytes, 0);
+            combined.set(createdBytes, nonceBytes.length);
+            combined.set(passwordBytes, nonceBytes.length + createdBytes.length);
+
+            const digestBuffer = await window.crypto.subtle.digest('SHA-1', combined);
+            const digestBase64 = btoa(String.fromCharCode.apply(null, new Uint8Array(digestBuffer)));
+
+            return `
+<wsse:Security>
+    <wsse:UsernameToken>
+        <wsse:Username>${username}</wsse:Username>
+        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">${digestBase64}</wsse:Password>
+        <wsse:Nonce EncodingType="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary">${nonceBase64}</wsse:Nonce>
+        <wsu:Created>${created}</wsu:Created>
+    </wsse:UsernameToken>
+</wsse:Security>`;
+        }
+
     </script>
 </body>
 </html>
