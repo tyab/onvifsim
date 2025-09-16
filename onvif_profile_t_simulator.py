@@ -6,6 +6,7 @@ import uuid
 from xml.etree import ElementTree as ET
 from datetime import datetime, timedelta
 import time
+import json
 import socket
 
 from flask import Flask, request, Response, render_template
@@ -39,7 +40,8 @@ class OnvifSoapService:
     """
     ONVIF SOAPリクエストを処理するFlaskベースのサービス。
     """
-    def __init__(self, server_ip, soap_port, rtsp_url, device_info, device_uuid, protocol="http"):
+    def __init__(self, server_ip, soap_port, rtsp_url, device_info, device_uuid, protocol="http",
+                 enable_ptz_forwarding=False, ptz_forwarding_address=('127.0.0.1', 50001)):
         self.app = Flask(__name__)
         self.server_ip = server_ip
         self.soap_port = soap_port
@@ -47,6 +49,7 @@ class OnvifSoapService:
         self.device_info = device_info
         self.device_uuid = device_uuid
         self.protocol = protocol
+        self.ptz_forwarding_enabled = enable_ptz_forwarding
         
         # ONVIFエンティティのトークンを定義
         self.video_source_token = "VideoSource_1"
@@ -62,6 +65,15 @@ class OnvifSoapService:
         self.ptz_move_thread = None
         self.ptz_stop_event = threading.Event()
         self.ptz_lock = threading.Lock()
+
+        # Unity連携が有効な場合、転送とフィードバックのセットアップを行う
+        if self.ptz_forwarding_enabled:
+            self.ptz_forwarding_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.ptz_forwarding_address = ptz_forwarding_address
+            # フィードバック受信用ポートは固定
+            self.ptz_feedback_port = 50002
+            self.ptz_feedback_thread = threading.Thread(target=self._listen_for_ptz_feedback, daemon=True)
+            self.ptz_feedback_thread.start()
 
         # Imaging state
         self.imaging_settings = {'brightness': 50.0, 'contrast': 50.0, 'saturation': 50.0}
@@ -82,6 +94,24 @@ class OnvifSoapService:
         self.app.add_url_rule("/onvif/imaging_service", "imaging_service", self.imaging_service, methods=["POST"])
         self.app.add_url_rule("/onvif/events_service", "events_service", self.events_service, methods=["POST"])
         self.app.add_url_rule("/onvif/events/pullpoint", "pull_messages", self.pull_messages, methods=["POST"])
+
+    def _listen_for_ptz_feedback(self):
+        """Unityから送信されるPTZの現在位置をUDPで受信し、状態を更新する。"""
+        logging.info(f"PTZフィードバックリスナーをポート {self.ptz_feedback_port} で開始します。")
+        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_socket.bind(('', self.ptz_feedback_port))
+
+        while True:
+            try:
+                data, _ = udp_socket.recvfrom(1024)
+                message = json.loads(data.decode('utf-8'))
+                with self.ptz_lock:
+                    self.ptz_position['x'] = message.get('pan', self.ptz_position['x'])
+                    self.ptz_position['y'] = message.get('tilt', self.ptz_position['y'])
+                    self.ptz_position['z'] = message.get('zoom', self.ptz_position['z'])
+                # logging.debug(f"PTZ feedback received: {self.ptz_position}")
+            except Exception as e:
+                logging.error(f"PTZフィードバックの処理中にエラーが発生しました: {e}")
 
     def run(self):
         """Flask Webサーバーを実行する。"""
@@ -305,12 +335,15 @@ class OnvifSoapService:
     def _ptz_continuous_move_loop(self):
         """PTZの連続移動をシミュレートするループ。"""
         logging.info(f"PTZ continuous move thread started with velocity: {self.ptz_velocity}")
+        # Unity連携時は、Unity側が位置を更新しフィードバックするため、
+        # Python側での位置更新は行わない。スレッドは移動中状態を示すために維持する。
         while not self.ptz_stop_event.is_set():
-            with self.ptz_lock:
-                # 座標を更新 (範囲チェックも行う)
-                self.ptz_position['x'] = max(-1.0, min(1.0, self.ptz_position['x'] + self.ptz_velocity['x'] * 0.1))
-                self.ptz_position['y'] = max(-1.0, min(1.0, self.ptz_position['y'] + self.ptz_velocity['y'] * 0.1))
-                self.ptz_position['z'] = max(0.0, min(1.0, self.ptz_position['z'] + self.ptz_velocity['z'] * 0.1))
+            if not self.ptz_forwarding_enabled:
+                # Unity連携が無効な場合のみ、内部で位置を更新する
+                with self.ptz_lock:
+                    self.ptz_position['x'] = max(-1.0, min(1.0, self.ptz_position['x'] + self.ptz_velocity['x'] * 0.1))
+                    self.ptz_position['y'] = max(-1.0, min(1.0, self.ptz_position['y'] + self.ptz_velocity['y'] * 0.1))
+                    self.ptz_position['z'] = max(0.0, min(1.0, self.ptz_position['z'] + self.ptz_velocity['z'] * 0.1))
             time.sleep(0.1)
         logging.info("PTZ continuous move thread stopped.")
         # 状態をリセット
@@ -381,6 +414,20 @@ class OnvifSoapService:
                     
                     logging.info(f"PTZ AbsoluteMove received. New position: {self.ptz_position}")
 
+                    # --- Unity/3Dエンジンへの転送処理 ---
+                    if self.ptz_forwarding_enabled:
+                        try:
+                            message = json.dumps({
+                                'type': 'absolute',
+                                'pan': self.ptz_position['x'],
+                                'tilt': self.ptz_position['y'],
+                                'zoom': self.ptz_position['z']
+                            }).encode('utf-8')
+                            self.ptz_forwarding_socket.sendto(message, self.ptz_forwarding_address)
+                            logging.info(f"Forwarded AbsoluteMove to {self.ptz_forwarding_address}")
+                        except Exception as e:
+                            logging.error(f"Failed to forward PTZ data: {e}")
+
             except Exception as e:
                 logging.error(f"AbsoluteMoveのパースに失敗: {e}")
                 # エラーが発生しても、ONVIF仕様に従い成功応答を返すことが多い
@@ -405,6 +452,20 @@ class OnvifSoapService:
                     if zoom_el is not None:
                         self.ptz_velocity['z'] = float(zoom_el.attrib.get('x', 0.0))
                 
+                # --- Unity/3Dエンジンへの転送処理 ---
+                if self.ptz_forwarding_enabled:
+                    try:
+                        message = json.dumps({
+                            'type': 'continuous',
+                            'pan_speed': self.ptz_velocity['x'],
+                            'tilt_speed': self.ptz_velocity['y'],
+                            'zoom_speed': self.ptz_velocity['z']
+                        }).encode('utf-8')
+                        self.ptz_forwarding_socket.sendto(message, self.ptz_forwarding_address)
+                        logging.info(f"Forwarded ContinuousMove to {self.ptz_forwarding_address}")
+                    except Exception as e:
+                        logging.error(f"Failed to forward PTZ data: {e}")
+
                 # 新しい移動スレッドを開始
                 self.ptz_stop_event.clear()
                 self.ptz_move_thread = threading.Thread(target=self._ptz_continuous_move_loop, daemon=True)
@@ -420,6 +481,18 @@ class OnvifSoapService:
             if self.ptz_move_thread is not None:
                 self.ptz_stop_event.set()
                 self.ptz_move_thread.join() # スレッドの終了を待つ
+            
+            # --- Unity/3Dエンジンへの転送処理 ---
+            if self.ptz_forwarding_enabled:
+                try:
+                    message = json.dumps({
+                        'type': 'stop'
+                    }).encode('utf-8')
+                    self.ptz_forwarding_socket.sendto(message, self.ptz_forwarding_address)
+                    logging.info(f"Forwarded Stop to {self.ptz_forwarding_address}")
+                except Exception as e:
+                    logging.error(f"Failed to forward PTZ data: {e}")
+
             return self._generate_soap_response("<tptz:StopResponse/>")
 
         if action == "GetStatus":
@@ -539,7 +612,7 @@ class OnvifSimulator:
     ONVIF Profile Tシミュレーターのメインクラス。
     WS-DiscoveryとSOAPコンポーネントを管理する。
     """
-    def __init__(self, server_ip, soap_port, rtsp_url, device_info_path, protocol="http"):
+    def __init__(self, server_ip, soap_port, rtsp_url, device_info_path, protocol="http", **kwargs):
         self.server_ip = server_ip
         self.soap_port = soap_port
         self.rtsp_url = rtsp_url
@@ -550,7 +623,9 @@ class OnvifSimulator:
 
         # 必要なモジュールをインポート
         self.wsp = None # WS-Publishingインスタンスを保持
-        self.soap_service = OnvifSoapService(server_ip, soap_port, rtsp_url, device_info, self.device_uuid, self.protocol)
+        self.soap_service = OnvifSoapService(
+            server_ip, soap_port, rtsp_url, device_info, self.device_uuid, self.protocol,
+            **kwargs)
 
     def _setup_ws_discovery(self):
         """WS-Discoveryサービスをセットアップし、公開を開始する。"""
@@ -609,6 +684,8 @@ if __name__ == "__main__":
     parser.add_argument("--device-info", type=str, default="device_info.json", help="デバイス情報JSONファイルのパス")
     parser.add_argument("--soap-port", type=int, default=8080, help="SOAPサービス用のポート番号 (デフォルト: 8080)")
     parser.add_argument("--https", action="store_true", help="HTTPSを有効にする (cert.pemとkey.pemが必要)")
+    parser.add_argument("--enable-ptz-forwarding", action="store_true", help="PTZコマンドをUDPで転送する機能を有効にする")
+    parser.add_argument("--ptz-forwarding-address", type=str, default="127.0.0.1:50001", help="PTZコマンドの転送先アドレス (IP:PORT)")
     args = parser.parse_args()
 
     server_ip = args.ip
@@ -620,11 +697,26 @@ if __name__ == "__main__":
 
     protocol = "https" if args.https else "http"
 
+    ptz_addr = None
+    if args.enable_ptz_forwarding:
+        try:
+            host, port_str = args.ptz_forwarding_address.split(':')
+            ptz_addr = (host, int(port_str))
+        except ValueError:
+            logging.error(f"PTZ転送アドレスの形式が不正です: {args.ptz_forwarding_address}。IP:PORT形式で指定してください。")
+            exit(1)
+
+    kwargs = {
+        'enable_ptz_forwarding': args.enable_ptz_forwarding,
+        'ptz_forwarding_address': ptz_addr,
+    }
+
     simulator = OnvifSimulator(
         server_ip=server_ip,
         soap_port=args.soap_port,
         rtsp_url=args.rtsp_url,
         device_info_path=args.device_info,
-        protocol=protocol
+        protocol=protocol,
+        **kwargs
     )
     simulator.run()
