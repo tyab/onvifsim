@@ -39,13 +39,14 @@ class OnvifSoapService:
     """
     ONVIF SOAPリクエストを処理するFlaskベースのサービス。
     """
-    def __init__(self, server_ip, soap_port, rtsp_url, device_info, device_uuid):
+    def __init__(self, server_ip, soap_port, rtsp_url, device_info, device_uuid, protocol="http"):
         self.app = Flask(__name__)
         self.server_ip = server_ip
         self.soap_port = soap_port
         self.rtsp_url = rtsp_url
         self.device_info = device_info
         self.device_uuid = device_uuid
+        self.protocol = protocol
         
         # ONVIFエンティティのトークンを定義
         self.video_source_token = "VideoSource_1"
@@ -84,14 +85,32 @@ class OnvifSoapService:
 
     def run(self):
         """Flask Webサーバーを実行する。"""
-        logging.info(f"SOAPサービスを http://{self.server_ip}:{self.soap_port} で開始します")
+        service_url = f"{self.protocol}://{self.server_ip}:{self.soap_port}"
+        logging.info(f"SOAPサービスを {service_url} で開始します")
+
+        ssl_context = None
+        if self.protocol == "https":
+            try:
+                # 自己署名証明書を使用
+                ssl_context = ('cert.pem', 'key.pem')
+                # 念のためファイルの存在を確認
+                with open(ssl_context[0]) as f: pass
+                with open(ssl_context[1]) as f: pass
+            except FileNotFoundError:
+                logging.error("HTTPSを有効にするには、'cert.pem'と'key.pem'が必要です。")
+                logging.error("openssl req -x509 -newkey rsa:4096 -nodes -out cert.pem -keyout key.pem -days 365 を実行して生成してください。")
+                return
+
         # ネットワーク上の他のマシンからアクセスできるように '0.0.0.0' でホスト
-        self.app.run(host='0.0.0.0', port=self.soap_port)
+        self.app.run(host='0.0.0.0', port=self.soap_port, ssl_context=ssl_context)
 
     def index(self):
         """ONVIF操作をテストするためのシンプルなHTMLページを返す。"""
         # テンプレートに変数を渡してレンダリングする
-        return render_template('index.html', profile_token=self.profile_token, rtsp_url=self.rtsp_url, video_source_token=self.video_source_token)
+        return render_template(
+            'index.html', protocol=self.protocol, host=f"{self.server_ip}:{self.soap_port}",
+            profile_token=self.profile_token, rtsp_url=self.rtsp_url, video_source_token=self.video_source_token
+        )
 
     def _generate_motion_events(self):
         """定期的にモーション検知イベントを生成する。"""
@@ -160,7 +179,7 @@ class OnvifSoapService:
 <tds:GetCapabilitiesResponse>
     <tds:Capabilities>
         <tt:Media>
-            <tt:XAddr>http://{self.server_ip}:{self.soap_port}/onvif/media_service</tt:XAddr>
+            <tt:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/media_service</tt:XAddr>
             <tt:StreamingCapabilities>
                 <tt:RTPMulticast>false</tt:RTPMulticast>
                 <tt:RTP_TCP>true</tt:RTP_TCP>
@@ -168,15 +187,15 @@ class OnvifSoapService:
             </tt:StreamingCapabilities>
         </tt:Media>
         <tt:Events>
-            <tt:XAddr>http://{self.server_ip}:{self.soap_port}/onvif/events_service</tt:XAddr>
+            <tt:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/events_service</tt:XAddr>
             <tt:WSSubscriptionPolicySupport>true</tt:WSSubscriptionPolicySupport>
             <tt:WSPullPointSupport>true</tt:WSPullPointSupport>
         </tt:Events>
         <tt:Imaging>
-            <tt:XAddr>http://{self.server_ip}:{self.soap_port}/onvif/imaging_service</tt:XAddr>
+            <tt:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/imaging_service</tt:XAddr>
         </tt:Imaging>
         <tt:PTZ>
-            <tt:XAddr>http://{self.server_ip}:{self.soap_port}/onvif/ptz_service</tt:XAddr>
+            <tt:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/ptz_service</tt:XAddr>
         </tt:Media>
     </tds:Capabilities>
 </tds:GetCapabilitiesResponse>
@@ -475,7 +494,7 @@ class OnvifSoapService:
 
         if action == "CreatePullPointSubscription":
             # 簡単な実装として、常に同じPullPoint URLを返す
-            pull_point_url = f"http://{self.server_ip}:{self.soap_port}/onvif/events/pullpoint"
+            pull_point_url = f"{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/events/pullpoint"
             current_time = datetime.utcnow()
             termination_time = current_time + timedelta(minutes=10)
             body = f"""
@@ -520,21 +539,22 @@ class OnvifSimulator:
     ONVIF Profile Tシミュレーターのメインクラス。
     WS-DiscoveryとSOAPコンポーネントを管理する。
     """
-    def __init__(self, server_ip, soap_port, rtsp_url, device_info_path):
+    def __init__(self, server_ip, soap_port, rtsp_url, device_info_path, protocol="http"):
         self.server_ip = server_ip
         self.soap_port = soap_port
         self.rtsp_url = rtsp_url
         self.device_uuid = uuid.uuid4()
+        self.protocol = protocol
 
         device_info = self._load_device_info(device_info_path)
 
         # 必要なモジュールをインポート
         self.wsp = None # WS-Publishingインスタンスを保持
-        self.soap_service = OnvifSoapService(server_ip, soap_port, rtsp_url, device_info, self.device_uuid)
+        self.soap_service = OnvifSoapService(server_ip, soap_port, rtsp_url, device_info, self.device_uuid, self.protocol)
 
     def _setup_ws_discovery(self):
         """WS-Discoveryサービスをセットアップし、公開を開始する。"""
-        xaddrs = [f"http://{self.server_ip}:{self.soap_port}/onvif/device_service"]
+        xaddrs = [f"{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/device_service"]
         scopes = [
             Scope("onvif://www.onvif.org/Profile/T"),
             Scope("onvif://www.onvif.org/name/GeminiSimulator"),
@@ -588,6 +608,7 @@ if __name__ == "__main__":
     parser.add_argument("--ip", type=str, help="シミュレーターをバインドするサーバーのIPアドレス (未指定の場合は自動検出)")
     parser.add_argument("--device-info", type=str, default="device_info.json", help="デバイス情報JSONファイルのパス")
     parser.add_argument("--soap-port", type=int, default=8080, help="SOAPサービス用のポート番号 (デフォルト: 8080)")
+    parser.add_argument("--https", action="store_true", help="HTTPSを有効にする (cert.pemとkey.pemが必要)")
     args = parser.parse_args()
 
     server_ip = args.ip
@@ -597,10 +618,13 @@ if __name__ == "__main__":
     else:
         logging.info(f"指定されたIPアドレスを使用します: {server_ip}")
 
+    protocol = "https" if args.https else "http"
+
     simulator = OnvifSimulator(
         server_ip=server_ip,
         soap_port=args.soap_port,
         rtsp_url=args.rtsp_url,
-        device_info_path=args.device_info
+        device_info_path=args.device_info,
+        protocol=protocol
     )
     simulator.run()

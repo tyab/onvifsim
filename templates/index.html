@@ -69,6 +69,9 @@
     </div>
 
     <script>
+        const serverProtocol = '{{ protocol }}';
+        const serverHost = '{{ host }}';
+
         // SOAP Body Templates
         const getCapabilitiesBody = `<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>`;
         const getDeviceInformationBody = `<tds:GetDeviceInformation/>`;
@@ -105,7 +108,8 @@
             responseBodyElem.textContent = 'Sending...';
 
             try {
-                const response = await fetch(endpoint, {
+                const url = `${serverProtocol}://${serverHost}${endpoint}`;
+                const response = await fetch(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/soap+xml; charset=utf-8' },
                     body: soapEnvelope.trim()

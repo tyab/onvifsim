@@ -57,7 +57,10 @@ python onvif_profile_t_simulator.py rtsp://localhost:8554/stream_test
 python onvif_profile_t_simulator.py rtsp://... --soap-port 8000 --device-info my_camera.json
 ```
 
-### 3. テストページの利用
+### 3. (任意) HTTPS用の自己署名証明書の生成
+  HTTPSを有効にしてシミュレーターを起動する場合、SSL証明書が必要です。以下のコマンドでテスト用の自己署名証明書 (cert.pem, key.pem) を生成できます。 + +bash +openssl req -x509 -newkey rsa:4096 -nodes -out cert.pem -keyout key.pem -days 365 
+
+### 4. テストページの利用
 
 Webブラウザで `http://<YOUR_IP_ADDRESS>:8080` にアクセスすると、テストページが表示されます。
 このページから各ONVIFコマンドを送信し、リクエストとレスポンスの内容をリアルタイムで確認できます。
@@ -83,5 +86,6 @@ Webブラウザで `http://<YOUR_IP_ADDRESS>:8080` にアクセスすると、�
 ├── templates/
 │   └── index.html                # WebテストページのHTMLテンプレート
 ├── device_info.json              # 設定可能なデバイス情報ファイル
-└── requirements.txt              # 依存パッケージリスト
+├── requirements.txt              # 依存パッケージリスト
+└── .gitignore                    # Gitの追跡対象外ファイルリスト
 ```
