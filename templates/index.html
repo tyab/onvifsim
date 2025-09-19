@@ -32,6 +32,13 @@
             <div>Username: <input type="text" id="username" value="admin" style="width: 120px;"></div>
             <div>Password: <input type="password" id="password" value="" style="width: 120px;"></div>
         </div>
+        <div style="margin-top: 10px; display: flex; align-items: center; gap: 10px;">
+            <button onclick="discoverDevices()">Discover Devices</button>
+            <select id="discoveredDevices" onchange="selectDevice(this)" style="padding: 5px; min-width: 250px;">
+                <option value="">-- Select a discovered device --</option>
+            </select>
+            <span id="discoverSpinner" style="display: none;">🔍 Searching...</span>
+        </div>
         <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
             <button onclick="authenticateDevice()">Authenticate</button>
             <div id="authStatus" style="font-weight: bold;">Status: Not Authenticated</div>
@@ -126,6 +133,52 @@
         function log(message) {
             const time = new Date().toLocaleTimeString();
             logDiv.innerHTML = `[${time}] ${message}\n` + logDiv.innerHTML;
+        }
+
+        async function discoverDevices() {
+            const discoverBtn = document.querySelector('button[onclick="discoverDevices()"]');
+            const spinner = document.getElementById('discoverSpinner');
+            const devicesSelect = document.getElementById('discoveredDevices');
+
+            discoverBtn.disabled = true;
+            spinner.style.display = 'inline';
+            devicesSelect.innerHTML = '<option value="">-- Searching... --</option>';
+            log('Starting device discovery...');
+
+            try {
+                const response = await fetch('/discover');
+                if (!response.ok) {
+                    throw new Error(`Discovery failed with status: ${response.status}`);
+                }
+                const devices = await response.json();
+
+                devicesSelect.innerHTML = '<option value="">-- Select a discovered device --</option>';
+                if (devices.length > 0) {
+                    devices.forEach(device => {
+                        const option = document.createElement('option');
+                        option.value = `${device.ip}:${device.port}`;
+                        option.textContent = `${device.name} (${device.ip}:${device.port})`;
+                        devicesSelect.appendChild(option);
+                    });
+                    log(`Discovery finished. Found ${devices.length} device(s).`);
+                } else {
+                    log('Discovery finished. No devices found.');
+                    devicesSelect.innerHTML = '<option value="">-- No devices found --</option>';
+                }
+            } catch (error) {
+                log(`Error during discovery: ${error}`);
+                console.error('Discovery error:', error);
+                devicesSelect.innerHTML = '<option value="">-- Discovery failed --</option>';
+            } finally {
+                discoverBtn.disabled = false;
+                spinner.style.display = 'none';
+            }
+        }
+
+        function selectDevice(selectElement) {
+            const [ip, port] = selectElement.value.split(':');
+            document.getElementById('targetIp').value = ip || '{{ server_ip }}';
+            document.getElementById('targetPort').value = port || '{{ soap_port }}';
         }
 
         async function sendSoapRequest(service, body) {

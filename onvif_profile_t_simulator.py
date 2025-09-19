@@ -11,10 +11,10 @@ import base64
 import hashlib
 import socket
 
-from flask import Flask, request, Response, render_template
+from flask import Flask, request, Response, render_template, jsonify
 from flask_cors import CORS
 from wsdiscovery.publishing import ThreadedWSPublishing as WSPublishing
-from wsdiscovery import QName, Scope
+from wsdiscovery import QName, Scope, WSDiscovery
 
 # 基本的なロギング設定
 logging.basicConfig(
@@ -102,6 +102,7 @@ class OnvifSoapService:
         self.app.add_url_rule("/onvif/imaging_service", "imaging_service", self.imaging_service, methods=["POST"])
         self.app.add_url_rule("/onvif/events_service", "events_service", self.events_service, methods=["POST"])
         self.app.add_url_rule("/onvif/events/pullpoint", "pull_messages", self.pull_messages, methods=["POST"])
+        self.app.add_url_rule("/discover", "discover_devices", self.discover_devices, methods=["GET"])
 
     def _listen_for_ptz_feedback(self):
         """Unityから送信されるPTZの現在位置をUDPで受信し、状態を更新する。"""
@@ -141,6 +142,56 @@ class OnvifSoapService:
 
         # ネットワーク上の他のマシンからアクセスできるように '0.0.0.0' でホスト
         self.app.run(host='0.0.0.0', port=self.soap_port, ssl_context=ssl_context)
+
+    def discover_devices(self):
+        """ネットワーク上のONVIFデバイスをWS-Discoveryで探索し、結果をJSONで返す。"""
+        logging.info("WS-Discoveryによるデバイス探索を開始します...")
+        try:
+            devices = []
+            try:
+                wsd = WSDiscovery()
+                wsd.start()
+                # タイムアウトを5秒に設定
+                search_types = [QName("dn", "http://www.onvif.org/ver10/network/wsdl", "NetworkVideoTransmitter")]
+                services = wsd.searchServices(types=search_types, timeout=5)
+                wsd.stop()
+                for service in services:
+                    try:
+                        xaddr = service.getXAddrs()[0]
+                        parts = xaddr.split('//')[1].split('/')[0].split(':')
+                        ip = parts[0]
+                        port = parts[1] if len(parts) > 1 else '80'
+                        
+                        name = ip
+                        for scope in service.getScopes():
+                            if str(scope).startswith('onvif://www.onvif.org/name/'):
+                                name = str(scope).split('/')[-1]
+                                break
+                        
+                        devices.append({'name': name, 'ip': ip, 'port': port})
+                    except (IndexError, ValueError) as e:
+                        logging.warning(f"発見したサービスのXAddr解析に失敗しました: {service.getXAddrs()}, エラー: {e}")
+            except Exception as e:
+                logging.error(f"ネットワークデバイスの探索中にエラーが発生しました: {e}")
+
+            # 自分自身がリストに含まれているか確認し、なければリストの先頭に追加する
+            found_self = any(
+                d['ip'] == self.server_ip and d['port'] == str(self.soap_port)
+                for d in devices
+            )
+            if not found_self:
+                logging.info("発見リストに自分自身が含まれていなかったため、手動で追加します。")
+                devices.insert(0, {
+                    'name': self.device_info.get('Model', 'GeminiSimulator') + " (Self)",
+                    'ip': self.server_ip,
+                    'port': str(self.soap_port)
+                })
+
+            logging.info(f"{len(devices)}台のデバイスを発見しました。")
+            return jsonify(devices)
+        except Exception as e:
+            logging.error(f"デバイスリストのJSON応答生成中にエラーが発生しました: {e}")
+            return jsonify({"error": str(e)}), 500
 
     def index(self):
         """ONVIF操作をテストするためのシンプルなHTMLページを返す。"""
