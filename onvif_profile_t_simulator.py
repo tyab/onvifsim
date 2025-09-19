@@ -43,7 +43,7 @@ class OnvifSoapService:
     """
     ONVIF SOAPリクエストを処理するFlaskベースのサービス。
     """
-    def __init__(self, server_ip, soap_port, rtsp_url, device_info, device_uuid, protocol="http",
+    def __init__(self, server_ip, soap_port, rtsp_url, device_info, device_uuid, protocol="http", client_only=False,
                  enable_ptz_forwarding=False, ptz_forwarding_address=('127.0.0.1', 50001)):
         self.app = Flask(__name__)
         CORS(self.app)
@@ -53,56 +53,66 @@ class OnvifSoapService:
         self.device_info = device_info
         self.device_uuid = device_uuid
         self.protocol = protocol
-        self.ptz_forwarding_enabled = enable_ptz_forwarding
-        
-        # ONVIFエンティティのトークンを定義
-        self.video_source_token = "VideoSource_1"
-        self.video_encoder_token = "VideoEncoder_H265_1"
-        self.profile_token = "Profile_T_1"
-        self.profile_name = "ProfileT_H265"
-        self.ptz_node_token = "PTZNode_1"
-        self.ptz_configuration_token = "PTZConfiguration_1"
+        self.client_only = client_only
 
-        # PTZの現在位置を保持する状態
-        self.ptz_position = {'x': 0.0, 'y': 0.0, 'z': 0.0}
-        self.ptz_velocity = {'x': 0.0, 'y': 0.0, 'z': 0.0} # For ContinuousMove
-        self.ptz_move_thread = None
-        self.ptz_stop_event = threading.Event()
-        self.ptz_lock = threading.Lock()
-
-        # 認証済みクライアントを管理
-        self.authorized_clients = {} # { 'ip_address': expiration_time }
-        self.auth_lock = threading.Lock()
-
-        # Unity連携が有効な場合、転送とフィードバックのセットアップを行う
-        if self.ptz_forwarding_enabled:
-            self.ptz_forwarding_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.ptz_forwarding_address = ptz_forwarding_address
-            # フィードバック受信用ポートは固定
-            self.ptz_feedback_port = 50002
-            self.ptz_feedback_thread = threading.Thread(target=self._listen_for_ptz_feedback, daemon=True)
-            self.ptz_feedback_thread.start()
-
-        # Imaging state
-        self.imaging_settings = {'brightness': 50.0, 'contrast': 50.0, 'saturation': 50.0}
-        self.imaging_lock = threading.Lock()
-
-        # Eventing state
-        self.events_queue = []
-        self.events_lock = threading.Lock()
-        # Start a thread to generate dummy motion events
-        self.motion_event_thread = threading.Thread(target=self._generate_motion_events, daemon=True)
-        self.motion_event_thread.start()
+        # client-onlyモードでもテンプレートがエラーにならないように、
+        # プレースホルダーとしてデフォルト値を設定しておく。
+        self.profile_token = "ProfileToken"
+        self.video_source_token = "VideoSourceToken"
 
         # ルートを登録
-        self.app.add_url_rule("/onvif/device_service", "device_service", self.device_service, methods=["POST"])
-        self.app.add_url_rule("/onvif/media_service", "media_service", self.media_service, methods=["POST"])
-        self.app.add_url_rule("/onvif/ptz_service", "ptz_service", self.ptz_service, methods=["POST"])
         self.app.add_url_rule("/", "index", self.index, methods=["GET"])
-        self.app.add_url_rule("/onvif/imaging_service", "imaging_service", self.imaging_service, methods=["POST"])
-        self.app.add_url_rule("/onvif/events_service", "events_service", self.events_service, methods=["POST"])
-        self.app.add_url_rule("/onvif/events/pullpoint", "pull_messages", self.pull_messages, methods=["POST"])
         self.app.add_url_rule("/discover", "discover_devices", self.discover_devices, methods=["GET"])
+
+        if not client_only:
+            self.ptz_forwarding_enabled = enable_ptz_forwarding
+            
+            # ONVIFエンティティのトークンを定義
+            self.video_source_token = "VideoSource_1"
+            self.video_encoder_token = "VideoEncoder_H265_1"
+            self.profile_token = "Profile_T_1"
+            self.profile_name = "ProfileT_H265"
+            self.ptz_node_token = "PTZNode_1"
+            self.ptz_configuration_token = "PTZConfiguration_1"
+
+            # PTZの現在位置を保持する状態
+            self.ptz_position = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+            self.ptz_velocity = {'x': 0.0, 'y': 0.0, 'z': 0.0} # For ContinuousMove
+            self.ptz_move_thread = None
+            self.ptz_stop_event = threading.Event()
+            self.ptz_lock = threading.Lock()
+
+            # 認証済みクライアントを管理
+            self.authorized_clients = {} # { 'ip_address': expiration_time }
+            self.auth_lock = threading.Lock()
+
+            # Unity連携が有効な場合、転送とフィードバックのセットアップを行う
+            if self.ptz_forwarding_enabled:
+                self.ptz_forwarding_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.ptz_forwarding_address = ptz_forwarding_address
+                # フィードバック受信用ポートは固定
+                self.ptz_feedback_port = 50002
+                self.ptz_feedback_thread = threading.Thread(target=self._listen_for_ptz_feedback, daemon=True)
+                self.ptz_feedback_thread.start()
+
+            # Imaging state
+            self.imaging_settings = {'brightness': 50.0, 'contrast': 50.0, 'saturation': 50.0}
+            self.imaging_lock = threading.Lock()
+
+            # Eventing state
+            self.events_queue = []
+            self.events_lock = threading.Lock()
+            # Start a thread to generate dummy motion events
+            self.motion_event_thread = threading.Thread(target=self._generate_motion_events, daemon=True)
+            self.motion_event_thread.start()
+
+            # サーバー機能のルートを登録
+            self.app.add_url_rule("/onvif/device_service", "device_service", self.device_service, methods=["POST"])
+            self.app.add_url_rule("/onvif/media_service", "media_service", self.media_service, methods=["POST"])
+            self.app.add_url_rule("/onvif/ptz_service", "ptz_service", self.ptz_service, methods=["POST"])
+            self.app.add_url_rule("/onvif/imaging_service", "imaging_service", self.imaging_service, methods=["POST"])
+            self.app.add_url_rule("/onvif/events_service", "events_service", self.events_service, methods=["POST"])
+            self.app.add_url_rule("/onvif/events/pullpoint", "pull_messages", self.pull_messages, methods=["POST"])
 
     def _listen_for_ptz_feedback(self):
         """Unityから送信されるPTZの現在位置をUDPで受信し、状態を更新する。"""
@@ -124,8 +134,11 @@ class OnvifSoapService:
 
     def run(self):
         """Flask Webサーバーを実行する。"""
-        service_url = f"{self.protocol}://{self.server_ip}:{self.soap_port}"
-        logging.info(f"SOAPサービスを {service_url} で開始します")
+        # client_onlyモードかどうかでログメッセージを変更
+        if hasattr(self, 'ptz_forwarding_enabled'): # サーバーモードの場合
+            service_url = f"{self.protocol}://{self.server_ip}:{self.soap_port}"
+            logging.info(f"SOAPサービスを {service_url} で開始します")
+        # client_onlyモードの場合は、OnvifSimulatorクラスのrunメソッドでログを出す
 
         ssl_context = None
         if self.protocol == "https":
@@ -179,7 +192,7 @@ class OnvifSoapService:
                 d['ip'] == self.server_ip and d['port'] == str(self.soap_port)
                 for d in devices
             )
-            if not found_self:
+            if not found_self and not self.client_only:
                 logging.info("発見リストに自分自身が含まれていなかったため、手動で追加します。")
                 devices.insert(0, {
                     'name': self.device_info.get('Model', 'GeminiSimulator') + " (Self)",
@@ -800,8 +813,8 @@ class OnvifSimulator:
     ONVIF Profile Tシミュレーターのメインクラス。
     WS-DiscoveryとSOAPコンポーネントを管理する。
     """
-    def __init__(self, server_ip, soap_port, rtsp_url, device_info_path, protocol="http", **kwargs):
-        self.server_ip = server_ip
+    def __init__(self, server_ip, soap_port, rtsp_url, device_info_path, protocol="http", client_only=False, **kwargs):
+        self.server_ip = server_ip # 自身のIP。client_onlyでもindex.htmlのデフォルト値として使う
         self.soap_port = soap_port
         self.rtsp_url = rtsp_url
         self.device_uuid = uuid.uuid4()
@@ -809,10 +822,11 @@ class OnvifSimulator:
 
         device_info = self._load_device_info(device_info_path)
 
-        # 必要なモジュールをインポート
+        self.client_only = client_only
         self.wsp = None # WS-Publishingインスタンスを保持
         self.soap_service = OnvifSoapService(
             server_ip, soap_port, rtsp_url, device_info, self.device_uuid, self.protocol,
+            client_only=self.client_only,
             **kwargs)
 
     def _setup_ws_discovery(self):
@@ -849,12 +863,17 @@ class OnvifSimulator:
     def run(self):
         """シミュレーターの全コンポーネントを起動する。"""
         try:
-            # WS-Discoveryサービスをセットアップして起動
-            self._setup_ws_discovery()
+            if not self.client_only:
+                # サーバーモードの場合のみWS-Discoveryを起動
+                self._setup_ws_discovery()
 
             # SOAPサービスをメインスレッドで実行
             # Ctrl+CでFlaskサーバーが停止すると、プログラム全体が終了する
-            logging.info("シミュレーターを開始します。停止するには Ctrl+C を押してください。")
+            if self.client_only:
+                logging.info(f"クライアントモードで起動します。Webテストページを http://{self.server_ip}:{self.soap_port} で利用できます。")
+            else:
+                logging.info("シミュレーターを開始します。停止するには Ctrl+C を押してください。")
+            
             self.soap_service.run()
 
         except KeyboardInterrupt:
@@ -873,6 +892,7 @@ if __name__ == "__main__":
     parser.add_argument("--soap-port", type=int, default=8080, help="SOAPサービス用のポート番号 (デフォルト: 8080)")
     parser.add_argument("--https", action="store_true", help="HTTPSを有効にする (cert.pemとkey.pemが必要)")
     parser.add_argument("--enable-ptz-forwarding", action="store_true", help="PTZコマンドをUDPで転送する機能を有効にする")
+    parser.add_argument("--client-only", action="store_true", help="サーバー機能を起動せず、Webテストページのみを提供します。")
     parser.add_argument("--ptz-forwarding-address", type=str, default="127.0.0.1:50001", help="PTZコマンドの転送先アドレス (IP:PORT)")
     args = parser.parse_args()
 
@@ -886,7 +906,7 @@ if __name__ == "__main__":
     protocol = "https" if args.https else "http"
 
     ptz_addr = None
-    if args.enable_ptz_forwarding:
+    if not args.client_only and args.enable_ptz_forwarding:
         try:
             host, port_str = args.ptz_forwarding_address.split(':')
             ptz_addr = (host, int(port_str))
@@ -895,7 +915,7 @@ if __name__ == "__main__":
             exit(1)
 
     kwargs = {
-        'enable_ptz_forwarding': args.enable_ptz_forwarding,
+        'enable_ptz_forwarding': not args.client_only and args.enable_ptz_forwarding,
         'ptz_forwarding_address': ptz_addr,
     }
 
@@ -905,6 +925,7 @@ if __name__ == "__main__":
         rtsp_url=args.rtsp_url,
         device_info_path=args.device_info,
         protocol=protocol,
+        client_only=args.client_only,
         **kwargs
     )
     simulator.run()
