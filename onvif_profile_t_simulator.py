@@ -84,6 +84,7 @@ class OnvifSoapService:
 
             # 認証済みクライアントを管理
             self.authorized_clients = {} # { 'ip_address': expiration_time }
+            self.nonce_cache = {} # { 'nonce_value': expiration_time }
             self.auth_lock = threading.Lock()
 
             # Unity連携が有効な場合、転送とフィードバックのセットアップを行う
@@ -108,7 +109,9 @@ class OnvifSoapService:
 
             # サーバー機能のルートを登録
             self.app.add_url_rule("/onvif/device_service", "device_service", self.device_service, methods=["POST"])
-            self.app.add_url_rule("/onvif/media_service", "media_service", self.media_service, methods=["POST"])
+            # media_serviceはmedia2_serviceに置き換えるが、後方互換性のため古いエンドポイントも残しておく
+            self.app.add_url_rule("/onvif/media_service", "media_service_v10", self.media_service_v10, methods=["POST"])
+            self.app.add_url_rule("/onvif/media2_service", "media2_service", self.media2_service, methods=["POST"])
             self.app.add_url_rule("/onvif/ptz_service", "ptz_service", self.ptz_service, methods=["POST"])
             self.app.add_url_rule("/onvif/imaging_service", "imaging_service", self.imaging_service, methods=["POST"])
             self.app.add_url_rule("/onvif/events_service", "events_service", self.events_service, methods=["POST"])
@@ -289,35 +292,60 @@ class OnvifSoapService:
             # 1. ユーザー名をチェック
             if username_el.text != self.device_info['Username']:
                 logging.warning(f"ユーザー名が一致しません: expected={self.device_info['Username']}, actual={username_el.text}")
-                return False, "Sender"
+                return False, "wsse:FailedAuthentication"
 
-            # 2. サーバー側でDigestを再計算
+            # 2. NonceとTimestampを検証
+            nonce_val = nonce_el.text
+            created_str = created_el.text
+            now = datetime.utcnow()
+
+            with self.auth_lock:
+                # 2a. Timestampの有効期限をチェック (5分以内)
+                try:
+                    # Zとマイクロ秒の両方に対応
+                    created_dt = datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%S.%fZ") if '.' in created_str else datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%SZ")
+                    time_diff = abs((now - created_dt).total_seconds())
+                    if time_diff > 300: # 5 minutes
+                        logging.warning(f"Timestamp check failed. Difference: {time_diff}s. Created: {created_str}")
+                        return False, "wsse:FailedAuthentication"
+                except ValueError:
+                    logging.warning(f"Invalid timestamp format: {created_str}")
+                    return False, "wsse:InvalidSecurity"
+
+                # 2b. Nonceの再利用をチェック
+                # まず、期限切れのNonceをキャッシュから削除
+                expired_nonces = [k for k, v in self.nonce_cache.items() if v < now]
+                for k in expired_nonces:
+                    del self.nonce_cache[k]
+
+                if nonce_val in self.nonce_cache:
+                    logging.warning(f"リプレイ攻撃の可能性: Nonceが再利用されました: {nonce_val}")
+                    return False, "wsse:FailedAuthentication"
+
+            # 3. サーバー側でDigestを再計算
             # Digest = Base64(SHA1(Nonce + Created + Password))
             try:
-                nonce_bytes = base64.b64decode(nonce_el.text)
+                nonce_bytes = base64.b64decode(nonce_val)
             except Exception:
                 logging.error("NonceのBase64デコードに失敗しました。")
-                return False, "Sender"
+                return False, "wsse:InvalidSecurity"
 
-            created_str = created_el.text
             password_str = self.device_info['Password']
-
-            # バイト列を結合
             combined = nonce_bytes + created_str.encode('utf-8') + password_str.encode('utf-8')
-
-            # SHA-1ハッシュを計算し、Base64エンコード
             sha1 = hashlib.sha1()
             sha1.update(combined)
             server_digest = base64.b64encode(sha1.digest()).decode('utf-8')
 
-            # 3. Digestを比較
+            # 4. Digestを比較
             client_digest = password_digest_el.text
             if server_digest == client_digest:
                 logging.info(f"WS-Security認証に成功しました: user={username_el.text}")
-                # 認証済みクライアントとして登録
                 with self.auth_lock:
-                    expiration = datetime.utcnow() + timedelta(minutes=10) # 10分間有効
+                    # 認証済みクライアントとして登録
+                    expiration = now + timedelta(minutes=10) # 10分間有効
                     self.authorized_clients[client_ip] = expiration
+                    # 使用済みNonceをキャッシュに登録
+                    self.nonce_cache[nonce_val] = expiration
                     logging.info(f"クライアント {client_ip} を認証済みとして登録しました。有効期限: {expiration.isoformat()}Z")
                 return True, ""
             else:
@@ -336,8 +364,11 @@ class OnvifSoapService:
         response_template = f"""
 <soap-env:Envelope
     xmlns:soap-env="http://www.w3.org/2003/05/soap-envelope"
+    xmlns:wsa="http://www.w3.org/2005/08/addressing"
+    xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2"
     xmlns:tds="http://www.onvif.org/ver10/device/wsdl"
     xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
+    xmlns:tr2="http://www.onvif.org/ver20/media/wsdl"
     xmlns:tt="http://www.onvif.org/ver10/schema"
     xmlns:tns1="http://www.onvif.org/ver10/topics"
     xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
@@ -383,14 +414,17 @@ class OnvifSoapService:
             body = f"""
 <tds:GetCapabilitiesResponse>
     <tds:Capabilities>
-        <tt:Media>
-            <tt:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/media_service</tt:XAddr>
+        <tt:Media2>
+            <tt:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/media2_service</tt:XAddr>
             <tt:StreamingCapabilities>
                 <tt:RTPMulticast>false</tt:RTPMulticast>
                 <tt:RTP_TCP>true</tt:RTP_TCP>
                 <tt:RTP_RTSP_TCP>true</tt:RTP_RTSP_TCP>
             </tt:StreamingCapabilities>
-        </tt:Media>
+            <tt:ProfileCapabilities>
+                <tt:MaximumNumberOfProfiles>10</tt:MaximumNumberOfProfiles>
+            </tt:ProfileCapabilities>
+        </tt:Media2>
         <tt:Events>
             <tt:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/events_service</tt:XAddr>
             <tt:WSSubscriptionPolicySupport>true</tt:WSSubscriptionPolicySupport>
@@ -401,7 +435,26 @@ class OnvifSoapService:
         </tt:Imaging>
         <tt:PTZ>
             <tt:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/ptz_service</tt:XAddr>
-        </tt:Media>
+        </tt:PTZ>
+        <tt:Device>
+            <tt:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/device_service</tt:XAddr>
+            <tt:System>
+                <tt:DiscoveryResolve>true</tt:DiscoveryResolve>
+                <tt:DiscoveryBye>true</tt:DiscoveryBye>
+                <tt:RemoteDiscovery>false</tt:RemoteDiscovery>
+                <tt:SystemBackup>false</tt:SystemBackup>
+                <tt:SystemLogging>false</tt:SystemLogging>
+                <tt:FirmwareUpgrade>false</tt:FirmwareUpgrade>
+                <tt:HttpFirmwareUpgrade>false</tt:HttpFirmwareUpgrade>
+                <tt:HttpSystemBackup>false</tt:HttpSystemBackup>
+                <tt:HttpSystemLogging>false</tt:HttpSystemLogging>
+            </tt:System>
+            <tt:Security>
+                <tt:TLS1.2>true</tt:TLS1.2>
+                <tt:UsernameToken>true</tt:UsernameToken>
+                <tt:AccessPolicyConfig>true</tt:AccessPolicyConfig>
+            </tt:Security>
+        </tt:Device>
     </tds:Capabilities>
 </tds:GetCapabilitiesResponse>
 """
@@ -418,12 +471,74 @@ class OnvifSoapService:
 </tds:GetDeviceInformationResponse>
 """
             return self._generate_soap_response(body)
+
+        if action == "GetServices":
+            # Profile TではGetServicesが必須
+            include_v10_media = request.args.get('IncludeCapability', 'false') == 'true'
+            services = f"""
+    <tds:Service>
+        <tds:Namespace>http://www.onvif.org/ver10/device/wsdl</tds:Namespace>
+        <tds:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/device_service</tds:XAddr>
+        <tds:Version><tt:Major>22</tt:Major><tt:Minor>6</tt:Minor></tds:Version>
+    </tds:Service>
+    <tds:Service>
+        <tds:Namespace>http://www.onvif.org/ver20/media/wsdl</tds:Namespace>
+        <tds:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/media2_service</tds:XAddr>
+        <tds:Version><tt:Major>22</tt:Major><tt:Minor>6</tt:Minor></tds:Version>
+    </tds:Service>
+    <tds:Service>
+        <tds:Namespace>http://www.onvif.org/ver20/ptz/wsdl</tds:Namespace>
+        <tds:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/ptz_service</tds:XAddr>
+        <tds:Version><tt:Major>22</tt:Major><tt:Minor>6</tt:Minor></tds:Version>
+    </tds:Service>
+    <tds:Service>
+        <tds:Namespace>http://www.onvif.org/ver20/imaging/wsdl</tds:Namespace>
+        <tds:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/imaging_service</tds:XAddr>
+        <tds:Version><tt:Major>22</tt:Major><tt:Minor>6</tt:Minor></tds:Version>
+    </tds:Service>
+    <tds:Service>
+        <tds:Namespace>http://www.onvif.org/ver10/events/wsdl</tds:Namespace>
+        <tds:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/events_service</tds:XAddr>
+        <tds:Version><tt:Major>22</tt:Major><tt:Minor>6</tt:Minor></tds:Version>
+    </tds:Service>
+"""
+            if include_v10_media:
+                services += f"""
+    <tds:Service>
+        <tds:Namespace>http://www.onvif.org/ver10/media/wsdl</tds:Namespace>
+        <tds:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/media_service</tds:XAddr>
+        <tds:Version><tt:Major>22</tt:Major><tt:Minor>6</tt:Minor></tds:Version>
+    </tds:Service>
+"""
+            body = f"""
+<tds:GetServicesResponse>
+{services}
+</tds:GetServicesResponse>
+"""
+            return self._generate_soap_response(body)
+
+        if action == "GetUsers":
+            # Profile Tでは必須。シミュレーターなので設定ファイルから固定ユーザーを返す
+            username = self.device_info.get('Username', 'admin')
+            body = f"""
+<tds:GetUsersResponse>
+    <tds:User>
+        <tt:Username>{username}</tt:Username>
+        <tt:UserLevel>Administrator</tt:UserLevel>
+    </tds:User>
+</tds:GetUsersResponse>
+"""
+            return self._generate_soap_response(body)
+
+        if action == "SetUsers":
+            # 何もせず成功を返すスタブ実装
+            return self._generate_soap_response("<tds:SetUsersResponse/>")
         
         logging.warning(f"未処理のDevice serviceアクション: {action}")
         return "Not Implemented", 501
 
-    def media_service(self):
-        """media_serviceエンドポイントへのリクエストを処理する。"""
+    def media_service_v10(self):
+        """media_service (v10) エンドポイントへのリクエストを処理する。"""
         is_authorized, fault_code = self._verify_ws_security(request.data)
         if not is_authorized:
             return self._generate_soap_fault(fault_code, "An error occurred when verifying security")
@@ -511,6 +626,89 @@ class OnvifSoapService:
             return self._generate_soap_response(body)
 
         logging.warning(f"未処理のMedia serviceアクション: {action}")
+        return "Not Implemented", 501
+
+    def media2_service(self):
+        """media_service (v20, Profile T) エンドポイントへのリクエストを処理する。"""
+        is_authorized, fault_code = self._verify_ws_security(request.data)
+        if not is_authorized:
+            return self._generate_soap_fault(fault_code, "An error occurred when verifying security")
+
+        action = self._parse_soap_action(request.data)
+        logging.info(f"Media2 serviceがアクションを受信: {action}")
+
+        if action == "GetProfiles":
+            body = f"""
+<tr2:GetProfilesResponse>
+    <tr2:Profiles token="{self.profile_token}" fixed="true">
+        <tt:Name>{self.profile_name}</tt:Name>
+        <tt:VideoSourceConfiguration token="{self.video_source_token}">
+            <tt:Name>VideoSourceConfig</tt:Name>
+            <tt:UseCount>1</tt:UseCount>
+            <tt:SourceToken>{self.video_source_token}</tt:SourceToken>
+            <tt:Bounds x="0" y="0" width="1920" height="1080"/>
+        </tt:VideoSourceConfiguration>
+        <tt:VideoEncoderConfiguration token="{self.video_encoder_token}">
+            <tt:Name>VideoEncoder_H265</tt:Name>
+            <tt:UseCount>1</tt:UseCount>
+            <tt:Encoding>H265</tt:Encoding>
+            <tt:Resolution>
+                <tt:Width>1920</tt:Width>
+                <tt:Height>1080</tt:Height>
+            </tt:Resolution>
+            <tt:Quality>5</tt:Quality>
+            <tt:RateControl>
+                <tt:FrameRateLimit>30</tt:FrameRateLimit>
+                <tt:EncodingInterval>1</tt:EncodingInterval>
+                <tt:BitrateLimit>4096</tt:BitrateLimit>
+            </tt:RateControl>
+            <tt:Multicast>
+                <tt:Address>
+                    <tt:Type>IPv4</tt:Type>
+                    <tt:IPv4Address>0.0.0.0</tt:IPv4Address>
+                </tt:Address>
+                <tt:Port>0</tt:Port>
+                <tt:TTL>0</tt:TTL>
+                <tt:AutoStart>false</tt:AutoStart>
+            </tt:Multicast>
+            <tt:SessionTimeout>PT60S</tt:SessionTimeout>
+        </tt:VideoEncoderConfiguration>
+        <tt:PTZConfiguration token="{self.ptz_configuration_token}">
+            <tt:Name>PTZConfig-1</tt:Name>
+            <tt:UseCount>1</tt:UseCount>
+            <tt:NodeToken>{self.ptz_node_token}</tt:NodeToken>
+        </tt:PTZConfiguration>
+        <tt:MetadataConfiguration token="MetadataConfigToken">
+             <tt:Name>MetadataConfig-1</tt:Name>
+             <tt:UseCount>1</tt:UseCount>
+             <tt:Analytics>true</tt:Analytics>
+             <tt:Multicast>
+                <tt:Address>
+                    <tt:Type>IPv4</tt:Type>
+                    <tt:IPv4Address>0.0.0.0</tt:IPv4Address>
+                </tt:Address>
+                <tt:Port>0</tt:Port>
+                <tt:TTL>0</tt:TTL>
+                <tt:AutoStart>false</tt:AutoStart>
+             </tt:Multicast>
+             <tt:SessionTimeout>PT60S</tt:SessionTimeout>
+        </tt:MetadataConfiguration>
+    </tr2:Profiles>
+</tr2:GetProfilesResponse>
+"""
+            return self._generate_soap_response(body)
+
+        if action == "GetStreamUri":
+            # RTSP URLが指定されていない場合は空のURIを返す
+            uri = self.rtsp_url if self.rtsp_url else ""
+            body = f"""
+<tr2:GetStreamUriResponse>
+    <tr2:Uri>{uri}</tr2:Uri>
+</tr2:GetStreamUriResponse>
+"""
+            return self._generate_soap_response(body)
+
+        logging.warning(f"未処理のMedia2 serviceアクション: {action}")
         return "Not Implemented", 501
 
     def _ptz_continuous_move_loop(self):
