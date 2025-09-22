@@ -268,6 +268,7 @@ class OnvifSoapService:
 
         # device_infoにユーザー名/パスワードがなければ認証不要とみなす
         if 'Username' not in self.device_info or not self.device_info['Username']:
+            logging.info("device_infoにユーザー名が設定されていないため、認証をスキップします。")
             return True, ""
 
         try:
@@ -372,7 +373,7 @@ class OnvifSoapService:
 
     def device_service(self):
         """device_serviceエンドポイントへのリクエストを処理する。"""
-        is_authorized, fault_code = self._verify_ws_security(request.data, unauthenticated_actions=["GetCapabilities"])
+        is_authorized, fault_code = self._verify_ws_security(request.data, unauthenticated_actions=["GetCapabilities", "GetSystemDateAndTime"])
         if not is_authorized:
             return self._generate_soap_fault(fault_code, "An error occurred when verifying security")
 
@@ -401,7 +402,7 @@ class OnvifSoapService:
         </tt:Imaging>
         <tt:PTZ>
             <tt:XAddr>{self.protocol}://{self.server_ip}:{self.soap_port}/onvif/ptz_service</tt:XAddr>
-        </tt:Media>
+        </tt:PTZ>
     </tds:Capabilities>
 </tds:GetCapabilitiesResponse>
 """
@@ -419,6 +420,31 @@ class OnvifSoapService:
 """
             return self._generate_soap_response(body)
         
+        if action == "GetSystemDateAndTime":
+            now = datetime.utcnow()
+            body = f"""
+<tds:GetSystemDateAndTimeResponse>
+    <tds:SystemDateAndTime>
+        <tt:DateTimeType>Manual</tt:DateTimeType>
+        <tt:DaylightSavings>false</tt:DaylightSavings>
+        <tt:TimeZone><tt:TZ>UTC</tt:TZ></tt:TimeZone>
+        <tt:UTCDateTime>
+            <tt:Time>
+                <tt:Hour>{now.hour}</tt:Hour>
+                <tt:Minute>{now.minute}</tt:Minute>
+                <tt:Second>{now.second}</tt:Second>
+            </tt:Time>
+            <tt:Date>
+                <tt:Year>{now.year}</tt:Year>
+                <tt:Month>{now.month}</tt:Month>
+                <tt:Day>{now.day}</tt:Day>
+            </tt:Date>
+        </tt:UTCDateTime>
+    </tds:SystemDateAndTime>
+</tds:GetSystemDateAndTimeResponse>
+"""
+            return self._generate_soap_response(body)
+
         logging.warning(f"未処理のDevice serviceアクション: {action}")
         return "Not Implemented", 501
 
@@ -547,9 +573,13 @@ class OnvifSoapService:
         <tt:Name>PTZNode-1</tt:Name>
         <tt:SupportedPTZSpaces>
             <tt:AbsolutePanTiltPositionSpace>
-                <tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace</tt:URI>
-                <tt:XRange><tt:Min>-1.0</tt:Min><tt:Max>1.0</tt:Max></tt:XRange> <!-- Pan: 360 endless -->
-                <tt:YRange><tt:Min>-1.0</tt:Min><tt:Max>1.0</tt:Max></tt:YRange> <!-- Tilt: -90 to +20 degrees -->
+                 <tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace</tt:URI>
+                 <!-- 
+                 Pan(XRange): Unity側でendlessPan=trueの場合、範囲を返さないのが仕様上正しい。
+                              これによりクライアントは連続回転可能と認識する。
+                 Tilt(YRange): Unity側のTiltRangeに合わせて正規化(-1.0 to 1.0)される。
+                 -->
+                 <tt:YRange><tt:Min>-1.0</tt:Min><tt:Max>1.0</tt:Max></tt:YRange>
             </tt:AbsolutePanTiltPositionSpace>
             <tt:AbsoluteZoomPositionSpace>
                 <tt:URI>http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace</tt:URI>
@@ -839,10 +869,16 @@ class OnvifSimulator:
         ]
         # ONVIF仕様では、TypeはQNameで指定することが推奨される
         # dn:NetworkVideoTransmitter
-        types = [QName("dn", "http://www.onvif.org/ver10/network/wsdl", "NetworkVideoTransmitter")]
-        
-        # Publishingサービスをインスタンス化して開始
+        types = [
+            QName("tds", "http://www.onvif.org/ver10/device/wsdl", "Device"),
+            QName("dn", "http://www.onvif.org/ver10/network/wsdl", "NetworkVideoTransmitter")
+        ]
+
+        # Publishingサービスをインスタンス化
         self.wsp = WSPublishing()
+        # インスタンス化後にip_addr属性を直接設定することで、コンストラクタのTypeErrorを回避しつつ、
+        # "No route to host"エラーを防ぐために使用するネットワークインターフェースを明示する
+        self.wsp.ip_addr = self.server_ip
         self.wsp.start()
 
         # サービスを公開

@@ -210,24 +210,18 @@ public class PTZController : MonoBehaviour
         }
 
         // --- カメラの回転とズームを適用 ---
-        if (localContinuousVelocity.sqrMagnitude > 0.001f)
-        {
-            // 連続移動中: Slerpで滑らかに追従
-            Quaternion targetRotation = Quaternion.Euler(localTargetEulerAngles);
-            transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.deltaTime * continuousSmoothingFactor);
-        }
-        else
-        {
-            // 絶対位置移動中または停止中: MoveTowardsで一定速度で移動
-            currentEulerAngles.y = Mathf.MoveTowardsAngle(currentEulerAngles.y, localTargetEulerAngles.y, absolutePanSpeed * Time.deltaTime);
-            currentEulerAngles.x = Mathf.MoveTowardsAngle(currentEulerAngles.x, localTargetEulerAngles.x, absoluteTiltSpeed * Time.deltaTime);
-            transform.rotation = Quaternion.Euler(currentEulerAngles);
-        }
+        // 常にSlerpを使用して目標角度へ滑らかに追従させることで、連続移動と絶対位置移動の間の挙動を統一する
+        Quaternion targetRotation = Quaternion.Euler(localTargetEulerAngles);
+        // 連続移動中はcontinuousSmoothingFactorで、それ以外はabsolutePan/TiltSpeedに合わせた速度で追従させる
+        float smoothing = (localContinuousVelocity.sqrMagnitude > 0.001f) ? continuousSmoothingFactor : absolutePanSpeed / 45f; // 速度係数を調整
+        transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, Time.deltaTime * smoothing);
         
+        // ズームも同様に滑らかに追従させる
         float finalTargetVFOV = Camera.HorizontalToVerticalFieldOfView(targetFieldOfView, controlledCamera.aspect);
-        controlledCamera.fieldOfView = Mathf.MoveTowards(controlledCamera.fieldOfView, finalTargetVFOV, absoluteZoomSpeed * Time.deltaTime);
-
-
+        // 連続移動中はcontinuousSmoothingFactorで、それ以外はabsoluteZoomSpeedに合わせた速度で追従させる
+        float zoomSmoothing = (localContinuousVelocity.sqrMagnitude > 0.001f) ? continuousSmoothingFactor : absoluteZoomSpeed / 10f; // 速度係数を調整
+        controlledCamera.fieldOfView = Mathf.Lerp(controlledCamera.fieldOfView, finalTargetVFOV, Time.deltaTime * zoomSmoothing);
+        
         // 定期的に現在位置をフィードバック
         if (enableFeedback)
         {
@@ -339,8 +333,8 @@ public class PTZController : MonoBehaviour
                     {
                         // Pan: [-1, 1] -> [panRange.x, panRange.y]
                         targetEulerAngles.y = Mathf.Lerp(panRange.x, panRange.y, (msg.pan + 1f) / 2f);
-                        // Tilt: [-1, 1] -> [tiltRange.y, tiltRange.x] (ONVIFとUnityで向きが逆)
-                        targetEulerAngles.x = Mathf.Lerp(tiltRange.y, tiltRange.x, (msg.tilt + 1f) / 2f);
+                        // Tilt: [-1, 1] -> [tiltRange.x, tiltRange.y] (ONVIFの-1が下、1が上。UnityのEulerXは値が小さいほど上)
+                        targetEulerAngles.x = Mathf.Lerp(tiltRange.y, tiltRange.x, (msg.tilt + 1f) / 2f); // ONVIFの-1(下)をtiltRange.y(例:20)に、1(上)をtiltRange.x(例:-90)にマッピング
                         // 連続移動を停止
                         continuousVelocity = Vector3.zero;
                     }
