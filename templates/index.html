@@ -31,6 +31,7 @@
             <div>Port: <input type="number" id="targetPort" value="{{ soap_port }}" style="width: 80px;"></div>
             <div>Username: <input type="text" id="username" value="admin" style="width: 120px;"></div>
             <div>Password: <input type="password" id="password" value="" style="width: 120px;"></div>
+            <div>Endpoint: <input type="text" id="endpointPath" value="onvif/device_service" style="width: 200px;"></div>
         </div>
         <div style="margin-top: 10px; display: flex; align-items: center; gap: 10px;">
             <button onclick="discoverDevices()">Discover Devices</button>
@@ -88,8 +89,8 @@
                 <h3>Device & Media</h3>
                 <button onclick="sendSoapRequest('device_service', getCapabilitiesBody)">GetCapabilities</button>
                 <button onclick="sendSoapRequest('device_service', getDeviceInformationBody)">GetDeviceInformation</button>
-                <button onclick="sendSoapRequest('media_service', getProfilesBody)">GetProfiles</button>
-                <button onclick="sendSoapRequest('media_service', getStreamUriBody)">GetStreamUri</button>
+                <p style="margin-top: 10px;"><strong>Active Profile Token:</strong> <code id="activeProfileToken">{{ profile_token }}</code></p>
+                <button onclick="getStreamUri()">GetStreamUri</button>
                 {% if rtsp_url %}
                 <p style="margin-top: 10px;"><strong>Simulator's RTSP URL:</strong> <code>{{ rtsp_url }}</code></p>
                 {% endif %}
@@ -97,7 +98,7 @@
             <div class="service-group">
                 <h3>PTZ & Imaging</h3>
                 <button onclick="sendSoapRequest('ptz_service', getNodesBody)">GetNodes</button>
-                <button onclick="sendSoapRequest('ptz_service', getStatusBody)">GetStatus</button>
+                <button onclick="getStatus()">GetStatus</button>
                 <button onclick="sendSoapRequest('imaging_service', getImagingSettingsBody)">GetImagingSettings</button>
             </div>
             <div class="service-group">
@@ -117,7 +118,8 @@
 
     <script>
         const protocol = '{{ protocol }}';
-        const profileToken = '{{ profile_token }}';
+        const initialProfileToken = '{{ profile_token }}';
+        let profileToken = initialProfileToken; // Use let to allow modification
         const videoSourceToken = '{{ video_source_token }}';
         const logDiv = document.getElementById('log');
         let pullIntervalId = null;
@@ -127,9 +129,9 @@
         const getCapabilitiesBody = `<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>`;
         const getDeviceInformationBody = `<tds:GetDeviceInformation/>`;
         const getProfilesBody = `<trt:GetProfiles/>`;
-        const getStreamUriBody = `<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>${profileToken}</trt:ProfileToken></trt:GetStreamUri>`;
+        const getStreamUriBody = () => `<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream><tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup><trt:ProfileToken>${profileToken}</trt:ProfileToken></trt:GetStreamUri>`;
         const getNodesBody = `<tptz:GetNodes/>`;
-        const getStatusBody = `<tptz:GetStatus><tptz:ProfileToken>${profileToken}</tptz:ProfileToken></tptz:GetStatus>`;
+        const getStatusBody = () => `<tptz:GetStatus><tptz:ProfileToken>${profileToken}</tptz:ProfileToken></tptz:GetStatus>`;
         const getImagingSettingsBody = `<timg:GetImagingSettings><timg:VideoSourceToken>${videoSourceToken}</timg:VideoSourceToken></timg:GetImagingSettings>`;
         const createPullPointSubscriptionBody = `<tev:CreatePullPointSubscription><tev:InitialTerminationTime>PT60S</tev:InitialTerminationTime></tev:CreatePullPointSubscription>`;
         const pullMessagesBody = `<tev:PullMessages><tev:Timeout>PT30S</tev:Timeout><tev:MessageLimit>10</tev:MessageLimit></tev:PullMessages>`;
@@ -185,53 +187,16 @@
             document.getElementById('targetPort').value = port || '{{ soap_port }}';
         }
 
-        async function sendSoapRequest(service, body) {
-            const targetIp = document.getElementById('targetIp').value;
-            const targetPort = document.getElementById('targetPort').value;
-            if (!targetIp || !targetPort) {
-                alert('Target IP Address and Port must be specified.');
-                return;
-            }
-            const url = `${protocol}://${targetIp}:${targetPort}/onvif/${service}`;
-            const soapEnvelope = `
-<soap-env:Envelope
-    xmlns:soap-env="http://www.w3.org/2003/05/soap-envelope"
-    xmlns:tds="http://www.onvif.org/ver10/device/wsdl"
-    xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
-    xmlns:tt="http://www.onvif.org/ver10/schema"
-    xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
-    xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
-    xmlns:tev="http://www.onvif.org/ver10/events/wsdl"
-    xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2"
-    xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
-    xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
-    <soap-env:Header>${await generateWSSecurityHeader()}</soap-env:Header>
-    <soap-env:Body>${body}</soap-env:Body>
-</soap-env:Envelope>
-            `;
-
-            log(`Request to ${service}:\n${soapEnvelope.trim().replace(/\s+/g, ' ')}`);
-
-            try {
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/soap+xml; charset=utf-8' },
-                    body: soapEnvelope.trim()
-                });
-
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const text = await response.text();
-                log(`Response from ${service}:\n${text.trim().replace(/\s+/g, ' ')}`);
-                return true; // Success
-            } catch (error) {
-                log(`Error: ${error}`);
-                console.error('Fetch error:', error);
+        async function ensureProfileToken() {
+            // 認証済みで、かつトークンが初期値の場合のみ取得
+            if (document.getElementById('authStatus').textContent.includes('Authenticated') && profileToken === initialProfileToken) {
+                log("Profile token is not set. Fetching automatically...");
+                await getAndUseProfileToken();
             }
         }
 
-        function ptzContinuousMove(panSpeed, tiltSpeed, zoomSpeed = 0) {
+        async function ptzContinuousMove(panSpeed, tiltSpeed, zoomSpeed = 0) {
+            await ensureProfileToken();
             const body = `
 <tptz:ContinuousMove>
     <tptz:ProfileToken>${profileToken}</tptz:ProfileToken>
@@ -244,7 +209,8 @@
             sendSoapRequest('ptz_service', body);
         }
 
-        function ptzStop() {
+        async function ptzStop() {
+            await ensureProfileToken();
             const body = `
 <tptz:Stop>
     <tptz:ProfileToken>${profileToken}</tptz:ProfileToken>
@@ -255,7 +221,8 @@
             sendSoapRequest('ptz_service', body);
         }
 
-        function ptzAbsoluteMove() {
+        async function ptzAbsoluteMove() {
+            await ensureProfileToken();
             const pan = document.getElementById('panAbs').value;
             const tilt = document.getElementById('tiltAbs').value;
             const zoom = document.getElementById('zoomAbs').value;
@@ -272,25 +239,111 @@
             sendSoapRequest('ptz_service', body);
         }
 
+        async function getAndUseProfileToken() {
+            log("Attempting to get profiles... (This requires authentication)");
+            const responseText = await sendSoapRequest('media_service', getProfilesBody);
+            if (!responseText) {
+                log("Failed to get profiles. Profile token not updated.");
+                return;
+            }
+
+            try {
+                const parser = new DOMParser();
+                const xmlDoc = parser.parseFromString(responseText, "text/xml");
+                const profileElement = xmlDoc.getElementsByTagName("trt:Profiles")[0];
+                const token = profileElement.getAttribute("token");
+                if (token) {
+                    profileToken = token;
+                    document.getElementById('activeProfileToken').textContent = token;
+                    log(`Successfully updated profile token to: ${token}`);
+                } else {
+                    log("Could not find profile token in the response.");
+                }
+            } catch (e) {
+                log(`Error parsing GetProfiles response: ${e}`);
+            }
+        }
+
+        async function getStreamUri() {
+            await ensureProfileToken();
+            sendSoapRequest('media_service', getStreamUriBody());
+        }
+
+        async function getStatus() {
+            await ensureProfileToken();
+            sendSoapRequest('ptz_service', getStatusBody());
+        }
+
         async function authenticateDevice() {
             const authStatusDiv = document.getElementById('authStatus');
             authStatusDiv.textContent = 'Status: Authenticating...';
             authStatusDiv.style.color = 'orange';
 
-            const success = await sendSoapRequest('device_service', getDeviceInformationBody);
-            authStatusDiv.textContent = success ? 'Status: Authenticated' : 'Status: Authentication Failed';
+            // GetDeviceInformationを送信して認証を試みる
+            const responseText = await sendSoapRequest('device_service', getDeviceInformationBody);
+            const success = responseText && !responseText.includes("Fault");
+            authStatusDiv.textContent = success ? 'Status: Authenticated' : 'Status: Authentication Succeeded (but check logs for faults)';
             authStatusDiv.style.color = success ? 'green' : 'red';
         }
 
-        async function generateWSSecurityHeader() {
+        // カメラの時刻を保持するグローバル変数
+        let cameraTime = null;
+        let cameraTimeFetchedAt = 0;
+
+        async function getCameraTime() {
+            // 10分以内に取得していればキャッシュを返す
+            if (cameraTime && (Date.now() - cameraTimeFetchedAt < 600000)) {
+                // 経過時間分だけ時刻を進める
+                const elapsedMs = Date.now() - cameraTimeFetchedAt;
+                return new Date(cameraTime.getTime() + elapsedMs);
+            }
+
+            log("Fetching current time from camera for accurate authentication...");
+            const getTimeBody = `<tds:GetSystemDateAndTime/>`;
+            // GetSystemDateAndTimeは認証なしでリクエストを送信
+            const responseText = await sendSoapRequest('device_service', getTimeBody, true); // skipAuthHeaderフラグをtrueに設定
+            if (!responseText) {
+                log("Failed to get camera time. Using local time as fallback.");
+                return new Date(); // 失敗した場合はローカル時刻
+            }
+
+            try {
+                const parser = new DOMParser();
+                const xmlDoc = parser.parseFromString(responseText, "text/xml");
+                const year = xmlDoc.getElementsByTagName("tt:Year")[0].childNodes[0].nodeValue;
+                const month = xmlDoc.getElementsByTagName("tt:Month")[0].childNodes[0].nodeValue;
+                const day = xmlDoc.getElementsByTagName("tt:Day")[0].childNodes[0].nodeValue;
+                const hour = xmlDoc.getElementsByTagName("tt:Hour")[0].childNodes[0].nodeValue;
+                const minute = xmlDoc.getElementsByTagName("tt:Minute")[0].childNodes[0].nodeValue;
+                const second = xmlDoc.getElementsByTagName("tt:Second")[0].childNodes[0].nodeValue;
+                
+                cameraTime = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+                cameraTimeFetchedAt = Date.now();
+                log(`Camera time synchronized: ${cameraTime.toISOString()}`);
+                return cameraTime;
+            } catch (e) {
+                log(`Error parsing camera time: ${e}. Using local time.`);
+                return new Date();
+            }
+        }
+
+        async function generateWSSecurityHeader(service, body) {
             const username = document.getElementById('username').value;
             const password = document.getElementById('password').value;
 
-            if (!username) {
+            // ユーザー名がない、または認証不要のアクションの場合はヘッダーを生成しない
+            const unauthenticatedActions = ['GetCapabilities']; // GetSystemDateAndTimeはここで判定する必要がなくなる
+            const actionMatch = body.match(/<(?:\w+:)?([^> ]+)/);
+            const action = actionMatch ? actionMatch[1] : '';
+
+            // ユーザー名が空、または認証不要アクションのリストに含まれている場合はヘッダーを生成しない
+            if (!username || unauthenticatedActions.includes(action) ) {
                 return ''; // ユーザー名がなければ認証ヘッダーなし
             }
 
-            const created = new Date().toISOString();
+            // カメラの時刻を取得して使用
+            const createdDate = await getCameraTime();
+            const created = createdDate.toISOString();
             
             // 1. Nonceの生成 (16バイトのランダム値)
             const nonceBytes = new Uint8Array(16);
@@ -320,6 +373,95 @@
         <wsu:Created>${created}</wsu:Created>
     </wsse:UsernameToken>
 </wsse:Security>`;
+        }
+
+        async function sendSoapRequest(service, body, skipAuthHeader = false) {
+            const targetIp = document.getElementById('targetIp').value;
+            const targetPort = document.getElementById('targetPort').value;
+            let endpointPath = document.getElementById('endpointPath').value;
+            if (!targetIp || !targetPort || !endpointPath) {
+                alert('Target IP, Port, and Endpoint must be specified.');
+                return null;
+            }
+            endpointPath = endpointPath.replace('device_service', service);
+            const proxyPort = 8081;
+            const url = `http://${window.location.hostname}:${proxyPort}/proxy/${endpointPath}?target_ip=${targetIp}&target_port=${targetPort}`;
+            
+            // skipAuthHeaderフラグがtrueの場合、認証ヘッダーの生成をスキップする
+            const securityHeader = skipAuthHeader ? '' : await generateWSSecurityHeader(service, body);
+
+            // --- Dynamic Namespace Generation ---
+            // Switch to SOAP 1.1, as some cameras are stricter and may fail with SOAP 1.2.
+            const namespaces = {
+                'soap-env': "http://schemas.xmlsoap.org/soap/envelope/", // SOAP 1.1
+                'tt': "http://www.onvif.org/ver10/schema"
+            };
+            if (securityHeader) {
+                namespaces['wsse'] = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd";
+                namespaces['wsu'] = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd";
+            }
+            // Add namespaces based on prefixes found in the body
+            const bodyPrefixes = (body.match(/<(\w+):/g) || []).map(p => p.substring(1, p.length - 1));
+            const serviceNamespaces = {
+                'tds': "http://www.onvif.org/ver10/device/wsdl",
+                'trt': "http://www.onvif.org/ver10/media/wsdl",
+                'tptz': "http://www.onvif.org/ver20/ptz/wsdl",
+                'timg': "http://www.onvif.org/ver20/imaging/wsdl",
+                'tev': "http://www.onvif.org/ver10/events/wsdl",
+                'wsnt': "http://docs.oasis-open.org/wsn/b-2"
+            };
+            bodyPrefixes.forEach(prefix => {
+                if (serviceNamespaces[prefix]) namespaces[prefix] = serviceNamespaces[prefix];
+            });
+            const namespaceString = Object.entries(namespaces).map(([key, value]) => `xmlns:${key}="${value}"`).join('\n    ');
+
+            // --- SOAPAction Header for SOAP 1.1 ---
+            const actionMatch = body.match(/<(?:\w+:)?([^> ]+)/);
+            const action = actionMatch ? actionMatch[1] : '';
+            const serviceUrls = {
+                'device_service': 'http://www.onvif.org/ver10/device/wsdl',
+                'media_service': 'http://www.onvif.org/ver10/media/wsdl',
+                'ptz_service': 'http://www.onvif.org/ver20/ptz/wsdl',
+                'imaging_service': 'http://www.onvif.org/ver20/imaging/wsdl',
+                'events_service': 'http://www.onvif.org/ver10/events/wsdl',
+                'events/pullpoint': 'http://www.onvif.org/ver10/events/wsdl/PullPoint'
+            };
+            let soapAction = "";
+            if (serviceUrls[service] && action) {
+                soapAction = `"${serviceUrls[service]}/${action}"`;
+            }
+
+            // ヘッダーが空でない場合のみ、Headerタグでラップする
+            const soapHeader = securityHeader ? `<soap-env:Header>${securityHeader}</soap-env:Header>` : '';
+
+            const soapEnvelope = `
+<soap-env:Envelope ${namespaceString}>
+    ${soapHeader}
+    <soap-env:Body>${body}</soap-env:Body>
+</soap-env:Envelope>
+            `;
+            log(`Request to ${url}:\n${soapEnvelope.trim().replace(/\s+/g, ' ')}`);
+
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'text/xml; charset=utf-8', // SOAP 1.1
+                        'SOAPAction': soapAction
+                    },
+                    body: soapEnvelope.trim()
+                });
+                const text = await response.text();
+                if (!response.ok) {
+                    log(`HTTP error! status: ${response.status}, body: ${text}`);
+                }
+                log(`Response from ${endpointPath}:\n${text.trim().replace(/\s+/g, ' ')}`);
+                return text; // レスポンスのテキストを返す
+            } catch (error) {
+                log(`Error: ${error}`);
+                console.error('Fetch error:', error);
+                return null; // 失敗時にnullを返す
+            }
         }
 
         function togglePullingMessages() {

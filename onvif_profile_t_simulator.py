@@ -162,12 +162,23 @@ class OnvifSoapService:
         try:
             devices = []
             try:
+                # IPアドレスの指定を削除し、ライブラリの自動検出に任せる。
+                # これにより、多くの標準的なネットワーク環境で安定して動作する。
                 wsd = WSDiscovery()
                 wsd.start()
-                # タイムアウトを5秒に設定
-                search_types = [QName("dn", "http://www.onvif.org/ver10/network/wsdl", "NetworkVideoTransmitter")]
-                services = wsd.searchServices(types=search_types, timeout=5)
+                # タイムアウトを3秒に設定。
+                # typesによる厳密なフィルタリングを解除し、応答があったすべてのデバイスを収集する。
+                # これにより、特殊なType形式で応答するカメラも発見できるようになる。
+                services = wsd.searchServices(timeout=3)
                 wsd.stop()
+
+                # 取得したサービスをフィルタリング
+                filtered_services = []
+                for service in services:
+                    if any("NetworkVideoTransmitter" in str(t) for t in service.getTypes()):
+                        filtered_services.append(service)
+                
+                services = filtered_services
                 for service in services:
                     try:
                         xaddr = service.getXAddrs()[0]
@@ -656,7 +667,7 @@ class OnvifSoapService:
                         except Exception as e:
                             logging.error(f"Failed to forward PTZ data: {e}")
 
-            except Exception as e:
+            except (ET.ParseError, AttributeError, KeyError, ValueError) as e:
                 logging.error(f"AbsoluteMoveのパースに失敗: {e}")
                 # エラーが発生しても、ONVIF仕様に従い成功応答を返すことが多い
 
@@ -702,7 +713,7 @@ class OnvifSoapService:
                 self.ptz_move_thread = threading.Thread(target=self._ptz_continuous_move_loop, daemon=True)
                 self.ptz_move_thread.start()
 
-            except Exception as e:
+            except (ET.ParseError, AttributeError, KeyError, ValueError) as e:
                 logging.error(f"ContinuousMoveのパースに失敗: {e}")
 
             return self._generate_soap_response("<tptz:ContinuousMoveResponse/>")
@@ -887,10 +898,8 @@ class OnvifSimulator:
         ]
 
         # Publishingサービスをインスタンス化
+        # こちらもIPアドレスの指定を削除し、ライブラリの自動検出に任せる。
         self.wsp = WSPublishing()
-        # インスタンス化後にip_addr属性を直接設定することで、コンストラクタのTypeErrorを回避しつつ、
-        # "No route to host"エラーを防ぐために使用するネットワークインターフェースを明示する
-        self.wsp.ip_addr = self.server_ip
         self.wsp.start()
 
         # サービスを公開
