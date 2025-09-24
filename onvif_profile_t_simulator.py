@@ -221,16 +221,22 @@ class OnvifSoapService:
 
     def _generate_motion_events(self):
         """定期的にモーション検知イベントを生成する。"""
-        while True:
-            # 30秒ごとにイベントを生成
-            time.sleep(30)
+        def add_event(state):
             with self.events_lock:
                 event_time = datetime.utcnow()
                 # キューが大きくなりすぎないように制御
                 if len(self.events_queue) > 50:
                     self.events_queue.pop(0)
-                self.events_queue.append({'topic': 'tns1:VideoSource/MotionAlarm', 'time': event_time, 'state': True})
-                logging.info("モーション検知イベントを生成しました (state=true)")
+                self.events_queue.append({'topic': 'tns1:VideoSource/MotionAlarm', 'time': event_time, 'state': state})
+                logging.info(f"モーション検知イベントを生成しました (state={str(state).lower()})")
+
+        while True:
+            # 45秒ごとにイベントを生成
+            time.sleep(45)
+            add_event(True)
+            # 5秒後にモーション停止イベントを生成
+            time.sleep(5)
+            add_event(False)
 
     def _parse_soap_action(self, data):
         """SOAPリクエストを解析し、アクション名を抽出する。"""
@@ -334,18 +340,24 @@ class OnvifSoapService:
         # is_faultがTrueの場合、body_contentは既にFault要素なので、Bodyでラップしない
         body_or_fault = body_content if is_fault else f"<soap-env:Body>{body_content}</soap-env:Body>"
 
+        # PullMessagesResponseの場合、特別なActionヘッダーが必要
+        action_header = ""
+        if "<tev:PullMessagesResponse>" in body_content:
+            action_header = "<wsa:Action xmlns:wsa=\"http://www.w3.org/2005/08/addressing\">http://www.onvif.org/ver10/events/wsdl/PullPoint/PullMessagesResponse</wsa:Action>"
+
         response_template = f"""
 <soap-env:Envelope
     xmlns:soap-env="http://www.w3.org/2003/05/soap-envelope"
     xmlns:tds="http://www.onvif.org/ver10/device/wsdl"
     xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
     xmlns:tt="http://www.onvif.org/ver10/schema"
+    xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2"
     xmlns:tns1="http://www.onvif.org/ver10/topics"
     xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
     xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
     xmlns:tev="http://www.onvif.org/ver10/events/wsdl"
     xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl">
-    <soap-env:Header></soap-env:Header>
+    <soap-env:Header>{action_header}</soap-env:Header>
     {body_or_fault}
 </soap-env:Envelope>
 """
@@ -798,7 +810,7 @@ class OnvifSoapService:
             current_time = datetime.utcnow()
             termination_time = current_time + timedelta(minutes=10)
             body = f"""
-<tev:CreatePullPointSubscriptionResponse>
+<tev:CreatePullPointSubscriptionResponse xmlns:wsa="http://www.w3.org/2005/08/addressing" xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2">
     <tev:SubscriptionReference>
         <wsa:Address>{pull_point_url}</wsa:Address>
     </tev:SubscriptionReference>
@@ -833,7 +845,7 @@ class OnvifSoapService:
 <tev:PullMessagesResponse>
     <tev:CurrentTime>{datetime.utcnow().isoformat()}Z</tev:CurrentTime>
     <tev:TerminationTime>{(datetime.utcnow() + timedelta(minutes=10)).isoformat()}Z</tev:TerminationTime>
-    {notifications}
+{notifications}
 </tev:PullMessagesResponse>
 """
         return self._generate_soap_response(body)

@@ -103,7 +103,9 @@
             <div class="service-group">
                 <h3>Events</h3>
                 <button onclick="sendSoapRequest('events_service', createPullPointSubscriptionBody)">CreatePullPointSubscription</button>
-                <button onclick="pullMessages()">PullMessages</button>
+                <button onclick="sendSoapRequest('events/pullpoint', pullMessagesBody)">PullMessages (Single)</button>
+                <button id="pullToggleBtn" onclick="togglePullingMessages()">Start Pulling Events</button>
+                <span id="pullStatus" style="margin-left: 10px;"></span>
             </div>
         </div>
 
@@ -118,6 +120,8 @@
         const profileToken = '{{ profile_token }}';
         const videoSourceToken = '{{ video_source_token }}';
         const logDiv = document.getElementById('log');
+        let pullIntervalId = null;
+
 
         // --- SOAP Body Templates ---
         const getCapabilitiesBody = `<tds:GetCapabilities><tds:Category>All</tds:Category></tds:GetCapabilities>`;
@@ -198,6 +202,7 @@
     xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
     xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
     xmlns:tev="http://www.onvif.org/ver10/events/wsdl"
+    xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2"
     xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
     xmlns:wsu="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd">
     <soap-env:Header>${await generateWSSecurityHeader()}</soap-env:Header>
@@ -228,7 +233,7 @@
 
         function ptzContinuousMove(panSpeed, tiltSpeed, zoomSpeed = 0) {
             const body = `
-<tptz:ContinuousMove xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
+<tptz:ContinuousMove>
     <tptz:ProfileToken>${profileToken}</tptz:ProfileToken>
     <tptz:Velocity>
         <tt:PanTilt x="${panSpeed}" y="${tiltSpeed}" />
@@ -241,7 +246,7 @@
 
         function ptzStop() {
             const body = `
-<tptz:Stop xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
+<tptz:Stop>
     <tptz:ProfileToken>${profileToken}</tptz:ProfileToken>
     <tptz:PanTilt>true</tptz:PanTilt>
     <tptz:Zoom>true</tptz:Zoom>
@@ -256,7 +261,7 @@
             const zoom = document.getElementById('zoomAbs').value;
 
             const body = `
-<tptz:AbsoluteMove xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
+<tptz:AbsoluteMove>
     <tptz:ProfileToken>${profileToken}</tptz:ProfileToken>
     <tptz:Position>
         <tt:PanTilt x="${pan}" y="${tilt}" />
@@ -317,6 +322,26 @@
 </wsse:Security>`;
         }
 
+        function togglePullingMessages() {
+            const pullBtn = document.getElementById('pullToggleBtn');
+            const pullStatus = document.getElementById('pullStatus');
+
+            if (pullIntervalId) {
+                // Stop pulling
+                clearInterval(pullIntervalId);
+                pullIntervalId = null;
+                pullBtn.textContent = 'Start Pulling Events';
+                pullBtn.style.backgroundColor = '#007bff';
+                pullStatus.textContent = 'Stopped.';
+            } else {
+                // Start pulling
+                sendSoapRequest('events/pullpoint', pullMessagesBody); // Pull immediately
+                pullIntervalId = setInterval(() => sendSoapRequest('events/pullpoint', pullMessagesBody), 5000); // Pull every 5 seconds
+                pullBtn.textContent = 'Stop Pulling Events';
+                pullBtn.style.backgroundColor = '#dc3545';
+                pullStatus.textContent = 'Polling every 5s...';
+            }
+        }
     </script>
 </body>
 </html>

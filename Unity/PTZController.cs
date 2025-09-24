@@ -181,7 +181,7 @@ public class PTZController : MonoBehaviour
             
             // Unityのオイラー角ではYがパン、Xがチルト（しかも向きが逆）
             float deltaPan = localContinuousVelocity.x * panSpeedMultiplier * Time.deltaTime;
-            float deltaTilt = -localContinuousVelocity.y * tiltSpeedMultiplier * Time.deltaTime;
+            float deltaTilt = localContinuousVelocity.y * tiltSpeedMultiplier * Time.deltaTime;
 
             lock (ptzStateLock)
             {
@@ -333,8 +333,8 @@ public class PTZController : MonoBehaviour
                     {
                         // Pan: [-1, 1] -> [panRange.x, panRange.y]
                         targetEulerAngles.y = Mathf.Lerp(panRange.x, panRange.y, (msg.pan + 1f) / 2f);
-                        // Tilt: [-1, 1] -> [tiltRange.x, tiltRange.y] (ONVIFの-1が下、1が上。UnityのEulerXは値が小さいほど上)
-                        targetEulerAngles.x = Mathf.Lerp(tiltRange.y, tiltRange.x, (msg.tilt + 1f) / 2f); // ONVIFの-1(下)をtiltRange.y(例:20)に、1(上)をtiltRange.x(例:-90)にマッピング
+                        // Tilt: [-1, 1] -> [tiltRange.x, tiltRange.y] (ONVIFの-1が下、1が上。UnityのEulerXは値が大きいほど下を向く)
+                        targetEulerAngles.x = Mathf.Lerp(tiltRange.x, tiltRange.y, (msg.tilt + 1f) / 2f);
                         // 連続移動を停止
                         continuousVelocity = Vector3.zero;
                     }
@@ -350,20 +350,10 @@ public class PTZController : MonoBehaviour
                     lock (ptzStateLock)
                     {
                         // 連続移動を開始する前に、現在のカメラの実際の角度で目標値をリセットする
-                        // これにより、AbsoluteMove後のSlerpの遅延による位置の飛びを防ぐ
-                        Vector3 currentEuler = transform.eulerAngles;
-
-                        // transform.eulerAngles は 0-360 の範囲で値を返すため、
-                        // スクリプト内部で使っている角度範囲 (例: -180～180) に変換する。
-                        // これをしないと、マイナス角度のチルトがクランプによって不正な値にリセットされてしまう。
-                        if (currentEuler.x > 180f) currentEuler.x -= 360f;
-                        if (currentEuler.y > 180f) currentEuler.y -= 360f;
-                        // Z軸は使用していないが、念のため正規化
-                        if (currentEuler.z > 180f) currentEuler.z -= 360f;
-
-                        targetEulerAngles = currentEuler;
-                        currentEulerAngles = currentEuler; // 連続移動開始時に、平滑化用の角度もリセット
-                        continuousVelocity = new Vector3(msg.pan_speed, msg.tilt_speed, msg.zoom_speed);
+                        // これにより、AbsoluteMove後のSlerpの遅延による位置の飛びや、意図しない方向を向く問題を解決する
+                        targetEulerAngles = transform.eulerAngles;
+                        // ONVIFのTiltは上が正、Unityの速度適用は下が正なので、ここで反転させる
+                        continuousVelocity = new Vector3(msg.pan_speed, -msg.tilt_speed, msg.zoom_speed);
                     }
                     // Zoomも同様に現在の値でリセットする。現在の垂直FOVを水平FOVに変換して目標値とする。
                     targetFieldOfView = Camera.VerticalToHorizontalFieldOfView(controlledCamera.fieldOfView, controlledCamera.aspect);
